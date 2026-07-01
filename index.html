@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="FitTrack" />
+  <meta name="theme-color" content="#0E1116" />
+  <title>FitTrack</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════
+       HEADER
+  ═══════════════════════════════════════════ -->
+  <header class="app-header">
+    <div class="header-date-block">
+      <span class="header-day-name" id="header-day-name">Monday</span>
+      <span class="header-date" id="header-date">June 30</span>
+    </div>
+    <div class="streak-badge" id="streak-badge" title="Current streak">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+      </svg>
+      <span class="streak-count" id="streak-count">0</span>
+      <span class="streak-label">day streak</span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════
+       WEEK STRIP
+  ═══════════════════════════════════════════ -->
+  <nav class="week-strip" aria-label="Week overview">
+    <div class="week-grid" id="week-grid">
+      <!-- JS renders 7 day cells Mon–Sun -->
+    </div>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════
+       MAIN CONTENT — TAB VIEWS
+  ═══════════════════════════════════════════ -->
+  <main class="main-content" id="main-content">
+
+    <!-- ── TODAY TAB ── -->
+    <section class="tab-view active" id="view-today" role="tabpanel" aria-label="Today's workout">
+
+      <!-- Bodyweight prompt card (shown on first visit each day) -->
+      <div class="card bw-prompt-card" id="bw-prompt-card" hidden>
+        <div class="bw-prompt-inner">
+          <span class="bw-prompt-label">Log today's bodyweight</span>
+          <div class="bw-input-row">
+            <input
+              class="bw-input"
+              id="bw-input"
+              type="number"
+              inputmode="decimal"
+              step="0.1"
+              min="20"
+              max="300"
+              placeholder="kg"
+              aria-label="Bodyweight in kilograms"
+            />
+            <button class="btn-primary bw-save-btn" id="bw-save-btn" aria-label="Save bodyweight">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session overview bar -->
+      <div class="session-overview" id="session-overview" hidden>
+        <div class="session-overview-inner">
+          <div class="session-meta">
+            <span class="session-name" id="session-name">Push Day</span>
+            <span class="session-progress-text" id="session-progress-text">0 / 5 exercises</span>
+          </div>
+          <div class="session-progress-bar-track">
+            <div class="session-progress-bar-fill" id="session-progress-bar" style="width: 0%"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rest day / No workout card -->
+      <div class="card rest-day-card" id="rest-day-card" hidden>
+        <div class="rest-day-inner">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--color-secondary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M18 8h1a4 4 0 0 1 0 8h-1"/>
+            <path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/>
+            <line x1="6" y1="1" x2="6" y2="4"/>
+            <line x1="10" y1="1" x2="10" y2="4"/>
+            <line x1="14" y1="1" x2="14" y2="4"/>
+          </svg>
+          <p class="rest-day-title">Rest Day</p>
+          <p class="rest-day-sub">Recovery is part of the program.</p>
+        </div>
+      </div>
+
+      <!-- No plan card -->
+      <div class="card no-plan-card" id="no-plan-card" hidden>
+        <div class="no-plan-inner">
+          <p class="no-plan-title">No workout planned</p>
+          <p class="no-plan-sub">Go to <strong>Plan</strong> to set up your weekly routine.</p>
+          <button class="btn-primary" id="go-to-plan-btn">Set up Plan</button>
+        </div>
+      </div>
+
+      <!-- Exercise cards stack — JS renders these -->
+      <div class="exercise-stack" id="exercise-stack">
+        <!-- Example structure JS will produce:
+        <div class="card exercise-card" data-exercise-id="bench-press">
+          <button class="exercise-header" aria-expanded="false">
+            <span class="exercise-done-check">
+              <svg ...checkmark... />
+            </span>
+            <span class="exercise-name">Bench Press</span>
+            <span class="exercise-summary">4 × 8</span>
+            <svg class="chevron-icon" ...chevron... />
+          </button>
+          <div class="exercise-body collapsed">
+            <div class="sets-table">
+              <div class="sets-table-header">
+                <span>Set</span><span>Previous</span><span>kg</span><span>Reps</span><span>Done</span>
+              </div>
+              <div class="set-row" data-set-index="0">
+                <span class="set-num">1</span>
+                <span class="set-prev">80 × 8</span>
+                <input class="set-input" type="number" inputmode="decimal" step="0.5" placeholder="kg" aria-label="Weight in kg" />
+                <input class="set-input set-reps" type="number" inputmode="numeric" min="1" placeholder="reps" aria-label="Reps" />
+                <button class="set-check" aria-label="Mark set done" aria-pressed="false">
+                  <svg ...check... />
+                </button>
+              </div>
+            </div>
+            <div class="exercise-notes-row">
+              <input class="notes-input" type="text" placeholder="Notes (optional)" aria-label="Exercise notes" />
+            </div>
+          </div>
+        </div>
+        -->
+      </div>
+
+      <!-- Finish session button -->
+      <div class="finish-session-row" id="finish-session-row" hidden>
+        <button class="btn-primary btn-finish" id="finish-session-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          Finish Session
+        </button>
+      </div>
+
+    </section>
+
+    <!-- ── PROGRESS TAB ── -->
+    <section class="tab-view" id="view-progress" role="tabpanel" aria-label="Progress" hidden>
+
+      <div class="section-header">
+        <h2 class="section-title">Bodyweight</h2>
+      </div>
+      <div class="card chart-card" id="bw-chart-card">
+        <canvas id="bw-chart" aria-label="Bodyweight trend chart" role="img"></canvas>
+        <p class="chart-empty" id="bw-chart-empty">No bodyweight data yet. Log your weight on the Today tab.</p>
+      </div>
+
+      <div class="section-header">
+        <h2 class="section-title">Volume per Week</h2>
+      </div>
+      <div class="card chart-card" id="volume-chart-card">
+        <canvas id="volume-chart" aria-label="Weekly volume chart" role="img"></canvas>
+        <p class="chart-empty" id="volume-chart-empty">Complete some sessions to see volume trends.</p>
+      </div>
+
+      <div class="section-header">
+        <h2 class="section-title">Exercise History</h2>
+      </div>
+      <div class="card" id="exercise-history-card">
+        <select class="select-input" id="history-exercise-select" aria-label="Select exercise to view history">
+          <option value="">-- Select an exercise --</option>
+        </select>
+        <div class="history-list" id="history-list">
+          <!-- JS renders history rows here -->
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ── PLAN TAB ── -->
+    <section class="tab-view" id="view-plan" role="tabpanel" aria-label="Workout plan" hidden>
+
+      <div class="section-header">
+        <h2 class="section-title">Weekly Routine</h2>
+        <button class="btn-secondary" id="save-plan-btn" aria-label="Save plan">Save</button>
+      </div>
+      <p class="section-sub">Assign a session name and exercises to each day. Leave empty for rest.</p>
+
+      <!-- JS renders one plan-day-card per day of the week -->
+      <div class="plan-days" id="plan-days">
+        <!-- Example day card structure JS will produce:
+        <div class="card plan-day-card" data-day="1">
+          <div class="plan-day-header">
+            <span class="plan-day-label">Monday</span>
+            <input class="plan-session-name-input" type="text" placeholder="e.g. Push Day" aria-label="Session name for Monday" />
+          </div>
+          <div class="plan-exercises-list" data-day="1">
+            <div class="plan-exercise-row" data-exercise-index="0">
+              <input class="plan-ex-name" type="text" placeholder="Exercise name" aria-label="Exercise name" />
+              <input class="plan-ex-sets" type="number" min="1" max="20" placeholder="Sets" aria-label="Sets" />
+              <input class="plan-ex-reps" type="text" placeholder="Reps" aria-label="Reps target" />
+              <button class="plan-ex-remove" aria-label="Remove exercise">
+                <svg ...x... />
+              </button>
+            </div>
+          </div>
+          <button class="btn-ghost plan-add-ex-btn" data-day="1">+ Add exercise</button>
+        </div>
+        -->
+      </div>
+
+    </section>
+
+    <!-- ── DATA TAB ── -->
+    <section class="tab-view" id="view-data" role="tabpanel" aria-label="Data management" hidden>
+
+      <div class="section-header">
+        <h2 class="section-title">Data</h2>
+      </div>
+
+      <div class="card data-card">
+        <p class="data-card-title">Export all data</p>
+        <p class="data-card-desc">Download a JSON backup of all your workouts, bodyweight logs, and settings.</p>
+        <button class="btn-secondary" id="export-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Export JSON
+        </button>
+      </div>
+
+      <div class="card data-card">
+        <p class="data-card-title">Import data</p>
+        <p class="data-card-desc">Restore from a previously exported JSON backup. This will overwrite all current data.</p>
+        <label class="btn-secondary import-label" for="import-file-input">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          Import JSON
+        </label>
+        <input type="file" id="import-file-input" accept=".json" style="display:none" aria-label="Import JSON backup" />
+      </div>
+
+      <div class="card data-card danger-card">
+        <p class="data-card-title danger-title">Clear all data</p>
+        <p class="data-card-desc">Permanently delete all workouts, logs, and settings. This cannot be undone.</p>
+        <button class="btn-danger" id="clear-data-btn">Clear All Data</button>
+      </div>
+
+      <div class="app-version-row">
+        <span>FitTrack</span>
+        <span id="app-version">v1.0.0</span>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ═══════════════════════════════════════════
+       BOTTOM TAB NAVIGATION
+  ═══════════════════════════════════════════ -->
+  <nav class="bottom-nav" aria-label="Main navigation">
+    <button class="nav-tab active-tab" data-view="today" aria-label="Today's workout" aria-selected="true" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 8h1a4 4 0 0 1 0 8h-1"/>
+        <path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/>
+        <line x1="6" y1="1" x2="6" y2="4"/>
+        <line x1="10" y1="1" x2="10" y2="4"/>
+        <line x1="14" y1="1" x2="14" y2="4"/>
+      </svg>
+      <span>Today</span>
+    </button>
+    <button class="nav-tab" data-view="progress" aria-label="Progress charts" aria-selected="false" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <line x1="18" y1="20" x2="18" y2="10"/>
+        <line x1="12" y1="20" x2="12" y2="4"/>
+        <line x1="6" y1="20" x2="6" y2="14"/>
+      </svg>
+      <span>Progress</span>
+    </button>
+    <button class="nav-tab" data-view="plan" aria-label="Workout plan" aria-selected="false" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+        <line x1="16" y1="2" x2="16" y2="6"/>
+        <line x1="8" y1="2" x2="8" y2="6"/>
+        <line x1="3" y1="10" x2="21" y2="10"/>
+      </svg>
+      <span>Plan</span>
+    </button>
+    <button class="nav-tab" data-view="data" aria-label="Data management" aria-selected="false" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+      </svg>
+      <span>Data</span>
+    </button>
+  </nav>
+
+  <!-- ═══════════════════════════════════════════
+       TOAST NOTIFICATION
+  ═══════════════════════════════════════════ -->
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- ═══════════════════════════════════════════
+       CONFIRM DIALOG (native-style overlay)
+  ═══════════════════════════════════════════ -->
+  <div class="dialog-overlay" id="dialog-overlay" hidden aria-modal="true" role="dialog">
+    <div class="dialog-box">
+      <p class="dialog-message" id="dialog-message"></p>
+      <div class="dialog-actions">
+        <button class="btn-secondary" id="dialog-cancel-btn">Cancel</button>
+        <button class="btn-danger" id="dialog-confirm-btn">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Register service worker -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./service-worker.js').catch(err => {
+          console.warn('[SW] Registration failed:', err);
+        });
+      });
+    }
+  </script>
+
+  <script type="module" src="./db.js"></script>
+  <script type="module" src="./app.js"></script>
+
+</body>
+</html>
