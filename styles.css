@@ -492,6 +492,11 @@ a { color: var(--color-accent); text-decoration: none; }
   margin-top: 8px;
 }
 
+.train-anyway-btn {
+  margin-top: 4px;
+  color: var(--color-accent);
+}
+
 /* ═══════════════════════════════════════════════════════
    EXERCISE CARDS
 ═══════════════════════════════════════════════════════ */
@@ -1424,6 +1429,8 @@ a { color: var(--color-accent); text-decoration: none; }
   padding: 4px 12px 10px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .swap-btn {
@@ -1434,4 +1441,14 @@ a { color: var(--color-accent); text-decoration: none; }
 
 .swap-btn:active {
   color: var(--color-accent);
+}
+
+.remove-ex-btn {
+  font-size: 12px;
+  color: var(--color-secondary);
+  gap: 4px;
+}
+
+.remove-ex-btn:active {
+  color: var(--color-danger);
 }

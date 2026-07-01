@@ -542,10 +542,8 @@ function renderHeader() {
  */
 function getDayStatus(dateStr) {
   const today      = state.ui.today;
-  const dayIdx     = dayIndexOf(dateStr);
-  const dayPlan    = state.plan?.days[dayIdx] ?? null;
-  const activeExs  = dayPlan?.exercises?.filter(e => !e.archived) ?? [];
-  const isRestDay  = !dayPlan || dayPlan.isRest || activeExs.length === 0;
+  const { activeEx, extras } = resolveExercisesForDate(dateStr);
+  const isRestDay  = activeEx.length === 0 && extras.length === 0;
   const finishedMap = state.meta[FINISHED_KEY]?.value ?? {};
 
   // Explicitly finished sessions win over everything else
@@ -662,6 +660,11 @@ async function init() {
 
   // 6. Empty-plan shortcut button
   document.getElementById('go-to-plan-btn').addEventListener('click', () => switchView('plan'));
+
+  // 6b. "Train anyway" on a rest day — adds an ad hoc session for the viewed date
+  document.getElementById('train-anyway-btn').addEventListener('click', () =>
+    handleAddExercise(state.ui.viewedDate)
+  );
 
   // 7. Finish session CTA
   document.getElementById('finish-session-btn').addEventListener('click', () =>
@@ -800,16 +803,39 @@ function isExerciseComplete(exerciseId, date, totalSets) {
 
 /**
  * Resolves the full list of exercises for a given date: the day's active
- * plan exercises (by weekday) plus any session-scoped swaps/adds stored
- * under meta key swaps_<date>.
+ * plan exercises (by weekday) — minus any session-scoped removals — plus
+ * any session-scoped swaps/adds. Both overrides are stored in `meta`
+ * under `removed_<date>` and `swaps_<date>` respectively, and never touch
+ * the recurring weekly plan document.
  */
 function resolveExercisesForDate(date) {
-  const dayIdx   = dayIndexOf(date);
-  const dayPlan  = state.plan?.days[dayIdx] ?? null;
-  const activeEx = (dayPlan?.exercises ?? []).filter(e => !e.archived);
-  const swapsKey = `swaps_${date}`;
-  const extras   = state.meta[swapsKey]?.value ?? [];
+  const dayIdx      = dayIndexOf(date);
+  const dayPlan     = state.plan?.days[dayIdx] ?? null;
+  const removedIds  = state.meta[`removed_${date}`]?.value ?? [];
+  const activeEx    = (dayPlan?.exercises ?? [])
+    .filter(e => !e.archived && !removedIds.includes(e.id));
+  const swapsKey    = `swaps_${date}`;
+  const extras      = state.meta[swapsKey]?.value ?? [];
   return { dayPlan, activeEx, extras, allExercises: [...activeEx, ...extras] };
+}
+
+/** Adds an exerciseId to a date's session-scoped removal list (idempotent). */
+async function addRemovedId(date, exerciseId) {
+  const key = `removed_${date}`;
+  const doc = state.meta[key] ?? { key, value: [] };
+  if (!doc.value.includes(exerciseId)) doc.value.push(exerciseId);
+  await put('meta', doc);
+  state.meta[key] = doc;
+}
+
+/** Removes an exerciseId from a date's session-scoped removal list, if present. */
+async function unremoveId(date, exerciseId) {
+  const key = `removed_${date}`;
+  const doc = state.meta[key];
+  if (!doc || !doc.value.includes(exerciseId)) return;
+  doc.value = doc.value.filter(id => id !== exerciseId);
+  await put('meta', doc);
+  state.meta[key] = doc;
 }
 
 /** Resolves a display name for an exerciseId from the plan or from swap log entries. */
@@ -831,8 +857,9 @@ function getExerciseName(exerciseId) {
 function renderToday() {
   const viewDate = state.ui.viewedDate || state.ui.today;
   const isFutureDate = viewDate > state.ui.today;
-  const { dayPlan, activeEx, allExercises } = resolveExercisesForDate(viewDate);
-  const isRest   = !dayPlan || dayPlan.isRest || activeEx.length === 0;
+  const { dayPlan, activeEx, extras, allExercises } = resolveExercisesForDate(viewDate);
+  const hasContent = activeEx.length > 0 || extras.length > 0;
+  const isRest   = !dayPlan || !hasContent;
   const finished = !!(state.meta[FINISHED_KEY]?.value?.[viewDate]);
 
   // Viewing-a-different-date banner
@@ -873,6 +900,7 @@ function renderToday() {
     exerciseStack.innerHTML = '';
     finishRow.hidden        = true;
     addExerciseRow.hidden   = true;
+    document.getElementById('train-anyway-btn').hidden = isFutureDate;
     return;
   }
 
@@ -882,7 +910,7 @@ function renderToday() {
   // Session progress counters
   sessionOverview.hidden = false;
   document.getElementById('session-name').textContent =
-    dayPlan.sessionName || 'Session';
+    dayPlan.sessionName || (dayPlan.isRest ? 'Extra Session' : 'Session');
 
   const completedCount = allExercises.filter(ex =>
     isExerciseComplete(ex.id, viewDate, ex.sets)
@@ -990,6 +1018,11 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
                   data-ex-id="${escHtml(ex.id)}"
                   data-ex-name="${escHtml(ex.name)}">
             ⇄ Can't do this? Swap it
+          </button>
+          <button class="btn-ghost remove-ex-btn"
+                  data-ex-id="${escHtml(ex.id)}"
+                  data-ex-name="${escHtml(ex.name)}">
+            ✕ Remove from session
           </button>
         </div>`;
 
@@ -1133,6 +1166,13 @@ function wireExerciseCards(exercises, date) {
   stack.querySelectorAll('.swap-btn').forEach(btn => {
     btn.addEventListener('click', () =>
       promptMidWorkoutSwap(btn.dataset.exId, btn.dataset.exName, date)
+    );
+  });
+
+  // Remove-from-session buttons
+  stack.querySelectorAll('.remove-ex-btn').forEach(btn => {
+    btn.addEventListener('click', () =>
+      handleRemoveExercise(btn.dataset.exId, btn.dataset.exName, date)
     );
   });
 }
@@ -1302,7 +1342,11 @@ async function promptMidWorkoutSwap(originalId, originalName, date) {
   await put('meta', swapDoc);
   state.meta[swapsKey] = swapDoc;
 
+  // Fully replace — hide the original from this date's session
+  await addRemovedId(date, originalId);
+
   renderToday();
+  renderWeekStrip();
   showToast(`Swapped to "${swapEx.name}".`);
 }
 
@@ -1333,7 +1377,39 @@ async function handleAddExercise(date) {
   state.meta[swapsKey] = bucket;
 
   renderToday();
+  renderWeekStrip();
   showToast(`Added "${newEx.name}".`);
+}
+
+/**
+ * Removes an exercise from a single date's session without touching the
+ * recurring weekly plan. Plan-sourced exercises are hidden via a
+ * session-scoped removal list; added/swapped extras are deleted outright.
+ */
+async function handleRemoveExercise(exerciseId, exerciseName, date) {
+  showDialog(`Remove "${exerciseName}" from this session?`, async () => {
+    const { extras } = resolveExercisesForDate(date);
+    const extraEx  = extras.find(e => e.id === exerciseId);
+
+    if (extraEx) {
+      const swapsKey = `swaps_${date}`;
+      const bucket   = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
+      bucket.value   = bucket.value.filter(e => e.id !== exerciseId);
+      await put('meta', bucket);
+      state.meta[swapsKey] = bucket;
+
+      // Removing a swap's substitute restores the original it replaced
+      if (extraEx.isSwap && extraEx.originalId) {
+        await unremoveId(date, extraEx.originalId);
+      }
+    } else {
+      await addRemovedId(date, exerciseId);
+    }
+
+    renderToday();
+    renderWeekStrip();
+    showToast(`Removed "${exerciseName}" from this session.`);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
