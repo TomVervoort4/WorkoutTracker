@@ -52,6 +52,12 @@
     <!-- ── TODAY TAB ── -->
     <section class="tab-view active" id="view-today" role="tabpanel" aria-label="Today's workout">
 
+      <!-- Viewing-a-different-date banner — shown only when viewing a past/future date -->
+      <div class="viewing-date-banner" id="viewing-date-banner" hidden>
+        <span class="viewing-date-text" id="viewing-date-text">Viewing June 29</span>
+        <button class="btn-ghost back-to-today-btn" id="back-to-today-btn">Back to Today</button>
+      </div>
+
       <!-- Bodyweight prompt card (shown on first visit each day) -->
       <div class="card bw-prompt-card" id="bw-prompt-card" hidden>
         <div class="bw-prompt-inner">
@@ -143,6 +149,13 @@
           </div>
         </div>
         -->
+      </div>
+
+      <!-- Add-exercise action (session-scoped, one-off) -->
+      <div class="add-exercise-row" id="add-exercise-row" hidden>
+        <button class="btn-ghost add-exercise-btn" id="add-exercise-btn">
+          + Add exercise
+        </button>
       </div>
 
       <!-- Finish session button -->

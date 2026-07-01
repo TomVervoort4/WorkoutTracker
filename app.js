@@ -140,6 +140,7 @@ const state = {
     today: '',                    // 'YYYY-MM-DD'
     weekDates: [],                // [Mon … Sun] date strings for current week
     todayDayIndex: 0,             // 0=Mon … 6=Sun
+    viewedDate: '',               // 'YYYY-MM-DD' — date shown in the Today/day-view tab
     expandedExerciseId: null,     // exercise ID whose accordion is open, or null
     _dialogConfirmCallback: null, // pending confirm action
   },
@@ -598,12 +599,9 @@ function renderWeekStrip() {
     `;
   }).join('');
 
-  // Tapping a day cell navigates to Today if it's today;
-  // future: could navigate to a historical log viewer
+  // Tapping any day cell opens that date's session in the day view (Today tab)
   grid.querySelectorAll('.day-cell').forEach(cell => {
-    cell.addEventListener('click', () => {
-      if (cell.dataset.date === today) switchView('today');
-    });
+    cell.addEventListener('click', () => handleDayCellClick(cell.dataset.date));
     cell.addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
@@ -611,6 +609,25 @@ function renderWeekStrip() {
       }
     });
   });
+}
+
+/** Opens a given date's session in the day view, switching to the Today tab if needed. */
+function handleDayCellClick(dateStr) {
+  state.ui.viewedDate = dateStr;
+  state.ui.expandedExerciseId = null;
+  if (state.ui.currentView !== 'today') {
+    switchView('today'); // switchView() already calls render()
+  } else {
+    render();
+  }
+}
+
+/** Returns the day view to today, clearing any past/future date being viewed. */
+function handleBackToToday() {
+  if (state.ui.viewedDate === state.ui.today) return;
+  state.ui.viewedDate = state.ui.today;
+  state.ui.expandedExerciseId = null;
+  render();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -624,6 +641,7 @@ async function init() {
   state.ui.today         = today;
   state.ui.weekDates     = weekDates;
   state.ui.todayDayIndex = dayIndexOf(today);
+  state.ui.viewedDate    = today;
 
   // 2. Pull everything out of IndexedDB
   await loadState();
@@ -646,7 +664,12 @@ async function init() {
   document.getElementById('go-to-plan-btn').addEventListener('click', () => switchView('plan'));
 
   // 7. Finish session CTA
-  document.getElementById('finish-session-btn').addEventListener('click', handleFinishSession);
+  document.getElementById('finish-session-btn').addEventListener('click', () =>
+    handleFinishSession(state.ui.viewedDate)
+  );
+
+  // 7b. Back-to-today banner button
+  document.getElementById('back-to-today-btn').addEventListener('click', handleBackToToday);
 
   // 8. Data tab actions
   document.getElementById('export-btn').addEventListener('click', handleExport);
@@ -775,6 +798,20 @@ function isExerciseComplete(exerciseId, date, totalSets) {
     .every(i => getExistingLog(date, exerciseId, i)?.done === true);
 }
 
+/**
+ * Resolves the full list of exercises for a given date: the day's active
+ * plan exercises (by weekday) plus any session-scoped swaps/adds stored
+ * under meta key swaps_<date>.
+ */
+function resolveExercisesForDate(date) {
+  const dayIdx   = dayIndexOf(date);
+  const dayPlan  = state.plan?.days[dayIdx] ?? null;
+  const activeEx = (dayPlan?.exercises ?? []).filter(e => !e.archived);
+  const swapsKey = `swaps_${date}`;
+  const extras   = state.meta[swapsKey]?.value ?? [];
+  return { dayPlan, activeEx, extras, allExercises: [...activeEx, ...extras] };
+}
+
 /** Resolves a display name for an exerciseId from the plan or from swap log entries. */
 function getExerciseName(exerciseId) {
   if (state.plan) {
@@ -792,19 +829,24 @@ function getExerciseName(exerciseId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function renderToday() {
-  const today   = state.ui.today;
-  const dayIdx  = state.ui.todayDayIndex;
-  const dayPlan = state.plan?.days[dayIdx] ?? null;
-  const activeEx = (dayPlan?.exercises ?? []).filter(e => !e.archived);
+  const viewDate = state.ui.viewedDate || state.ui.today;
+  const isFutureDate = viewDate > state.ui.today;
+  const { dayPlan, activeEx, allExercises } = resolveExercisesForDate(viewDate);
   const isRest   = !dayPlan || dayPlan.isRest || activeEx.length === 0;
-  const finished = !!(state.meta[FINISHED_KEY]?.value?.[today]);
+  const finished = !!(state.meta[FINISHED_KEY]?.value?.[viewDate]);
 
-  // Mid-workout swaps for today (stored in meta)
-  const swapsKey   = `swaps_${today}`;
-  const todaySwaps = state.meta[swapsKey]?.value ?? [];
+  // Viewing-a-different-date banner
+  const banner = document.getElementById('viewing-date-banner');
+  if (viewDate === state.ui.today) {
+    banner.hidden = true;
+  } else {
+    banner.hidden = false;
+    document.getElementById('viewing-date-text').textContent =
+      `Viewing ${friendlyDateLabel(viewDate)}${isFutureDate ? ' (upcoming)' : ''}`;
+  }
 
-  // Bodyweight prompt — hidden once logged
-  const bwLogged = !!state.bodyweight.find(b => b.date === today);
+  // Bodyweight prompt — always about today specifically, never the viewed date
+  const bwLogged = !!state.bodyweight.find(b => b.date === state.ui.today);
   document.getElementById('bw-prompt-card').hidden = bwLogged;
 
   const sessionOverview = document.getElementById('session-overview');
@@ -812,6 +854,7 @@ function renderToday() {
   const noPlanCard      = document.getElementById('no-plan-card');
   const exerciseStack   = document.getElementById('exercise-stack');
   const finishRow       = document.getElementById('finish-session-row');
+  const addExerciseRow  = document.getElementById('add-exercise-row');
 
   if (!state.plan) {
     sessionOverview.hidden  = true;
@@ -819,6 +862,7 @@ function renderToday() {
     noPlanCard.hidden       = false;
     exerciseStack.innerHTML = '';
     finishRow.hidden        = true;
+    addExerciseRow.hidden   = true;
     return;
   }
 
@@ -828,6 +872,7 @@ function renderToday() {
     noPlanCard.hidden       = true;
     exerciseStack.innerHTML = '';
     finishRow.hidden        = true;
+    addExerciseRow.hidden   = true;
     return;
   }
 
@@ -839,9 +884,8 @@ function renderToday() {
   document.getElementById('session-name').textContent =
     dayPlan.sessionName || 'Session';
 
-  const allExercises   = [...activeEx, ...todaySwaps];
   const completedCount = allExercises.filter(ex =>
-    isExerciseComplete(ex.id, today, ex.sets)
+    isExerciseComplete(ex.id, viewDate, ex.sets)
   ).length;
   const totalCount = allExercises.length;
 
@@ -850,22 +894,26 @@ function renderToday() {
   document.getElementById('session-progress-bar').style.width =
     totalCount > 0 ? `${Math.round((completedCount / totalCount) * 100)}%` : '0%';
 
-  // Rebuild exercise cards
+  // Rebuild exercise cards — read-only for future dates, nothing to log yet
   exerciseStack.innerHTML = allExercises
-    .map(ex => buildExerciseCardHTML(ex, today))
+    .map(ex => buildExerciseCardHTML(ex, viewDate, { readOnly: isFutureDate }))
     .join('');
-  wireExerciseCards(allExercises, today);
+  wireExerciseCards(allExercises, viewDate);
 
   // Show finish button if any sets are done and session isn't already finished
-  const doneLogsToday = state.logs.filter(l => l.date === today && l.done);
-  finishRow.hidden = finished || doneLogsToday.length === 0;
+  const doneLogsOnDate = state.logs.filter(l => l.date === viewDate && l.done);
+  finishRow.hidden = finished || isFutureDate || doneLogsOnDate.length === 0;
+
+  // Session-level "add exercise" action — not available for rest/future/no-plan
+  addExerciseRow.hidden = isFutureDate;
+  document.getElementById('add-exercise-btn').onclick = () => handleAddExercise(viewDate);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TODAY TAB — EXERCISE CARD HTML BUILDER
 // ─────────────────────────────────────────────────────────────────────────────
 
-function buildExerciseCardHTML(ex, date) {
+function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
   const prevLogs = getRecentLogsForExercise(ex.id, date);
   const pr       = getPRForExercise(ex.id);
   const complete = isExerciseComplete(ex.id, date, ex.sets);
@@ -874,6 +922,14 @@ function buildExerciseCardHTML(ex, date) {
   const prBadge = pr
     ? `<span class="ex-pr-badge">PR&nbsp;${pr.weight}kg</span>`
     : '';
+
+  const originTag = ex.isAdded
+    ? '<span class="ex-origin-tag">Added</span>'
+    : ex.isSwap
+      ? '<span class="ex-origin-tag">Swapped</span>'
+      : '';
+
+  const disabledAttr = readOnly ? 'disabled' : '';
 
   const setsRows = Array.from({ length: ex.sets }, (_, i) => {
     const log   = getExistingLog(date, ex.id, i);
@@ -893,17 +949,20 @@ function buildExerciseCardHTML(ex, date) {
                placeholder="kg"
                value="${log?.weight ?? ''}"
                aria-label="Weight kg, set ${i + 1}"
-               data-field="weight" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}" />
+               data-field="weight" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
+               ${disabledAttr} />
         <input class="set-input set-reps"
                type="number" inputmode="numeric" min="1"
                placeholder="${escHtml(String(ex.reps))}"
                value="${log?.reps ?? ''}"
                aria-label="Reps, set ${i + 1}"
-               data-field="reps" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}" />
+               data-field="reps" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
+               ${disabledAttr} />
         <button class="set-check"
                 aria-label="Mark set ${i + 1} done"
                 aria-pressed="${done}"
-                data-ex-id="${escHtml(ex.id)}" data-set-index="${i}">
+                data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
+                ${disabledAttr}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2.5"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -925,6 +984,15 @@ function buildExerciseCardHTML(ex, date) {
        </div>`
     : '';
 
+  const actionsRow = readOnly ? '' : `
+        <div class="exercise-actions-row">
+          <button class="btn-ghost swap-btn"
+                  data-ex-id="${escHtml(ex.id)}"
+                  data-ex-name="${escHtml(ex.name)}">
+            ⇄ Can't do this? Swap it
+          </button>
+        </div>`;
+
   return `
     <div class="card exercise-card${complete ? ' exercise-complete' : ''}"
          data-exercise-id="${escHtml(ex.id)}">
@@ -938,6 +1006,7 @@ function buildExerciseCardHTML(ex, date) {
         </span>
         <span class="exercise-name">${escHtml(ex.name)}</span>
         <span class="exercise-summary">${ex.sets}×${escHtml(String(ex.reps))}</span>
+        ${originTag}
         ${prBadge}
         <svg class="chevron-icon" width="16" height="16" viewBox="0 0 24 24"
              fill="none" stroke="currentColor" stroke-width="2.5"
@@ -959,15 +1028,10 @@ function buildExerciseCardHTML(ex, date) {
                  placeholder="Notes (optional)"
                  value="${escHtml(notesVal)}"
                  aria-label="Notes for ${escHtml(ex.name)}"
-                 data-ex-id="${escHtml(ex.id)}" />
+                 data-ex-id="${escHtml(ex.id)}"
+                 ${disabledAttr} />
         </div>
-        <div class="exercise-actions-row">
-          <button class="btn-ghost swap-btn"
-                  data-ex-id="${escHtml(ex.id)}"
-                  data-ex-name="${escHtml(ex.name)}">
-            ⇄ Can't do this? Swap it
-          </button>
-        </div>
+        ${actionsRow}
       </div>
     </div>`;
 }
@@ -1101,13 +1165,7 @@ async function handleSetCheck(exerciseId, setIndex, date) {
   }
 
   // Update exercise card's overall completion marker
-  const dayIdx   = dayIndexOf(date);
-  const swapsKey = `swaps_${date}`;
-  const swaps    = state.meta[swapsKey]?.value ?? [];
-  const allPlannedEx = [
-    ...(state.plan?.days[dayIdx]?.exercises ?? []).filter(e => !e.archived),
-    ...swaps,
-  ];
+  const { allExercises: allPlannedEx } = resolveExercisesForDate(date);
   const exDef    = allPlannedEx.find(e => e.id === exerciseId);
   const totalSets = exDef?.sets ?? setIndex + 1;
   const complete  = isExerciseComplete(exerciseId, date, totalSets);
@@ -1155,16 +1213,15 @@ async function handleBwSave() {
   showToast(`Bodyweight ${kg} kg logged.`);
 }
 
-async function handleFinishSession() {
-  const today    = state.ui.today;
-  const doneLogs = state.logs.filter(l => l.date === today && l.done);
+async function handleFinishSession(date) {
+  const doneLogs = state.logs.filter(l => l.date === date && l.done);
   if (!doneLogs.length) {
     showToast('Log at least one set before finishing.');
     return;
   }
 
   const finishedDoc = state.meta[FINISHED_KEY] ?? { key: FINISHED_KEY, value: {} };
-  finishedDoc.value[today] = true;
+  finishedDoc.value[date] = true;
   await put('meta', finishedDoc);
   state.meta[FINISHED_KEY] = finishedDoc;
 
@@ -1173,7 +1230,11 @@ async function handleFinishSession() {
   document.getElementById('finish-session-row').hidden = true;
   renderWeekStrip();
   renderHeader();
-  showToast('Session complete! Great work.');
+  showToast(
+    date === state.ui.today
+      ? 'Session complete! Great work.'
+      : `${friendlyDateLabel(date)} marked complete.`
+  );
 }
 
 async function recalculateStreak() {
@@ -1243,6 +1304,36 @@ async function promptMidWorkoutSwap(originalId, originalName, date) {
 
   renderToday();
   showToast(`Swapped to "${swapEx.name}".`);
+}
+
+/** Adds a one-off, session-scoped exercise to a date's session (not the recurring plan). */
+async function handleAddExercise(date) {
+  const name = window.prompt('Add exercise — enter its name:');
+  if (!name?.trim()) return;
+
+  const setsRaw = window.prompt('Sets (default 3):', '3');
+  const sets    = parseInt(setsRaw, 10) || 3;
+  const reps    = window.prompt('Reps target (default 8):', '8')?.trim() || '8';
+
+  const newEx = {
+    id:         generateId('added'),
+    name:       name.trim(),
+    sets,
+    reps,
+    muscles:    '',
+    cue:        '',
+    isAdded:    true,
+    originalId: null,
+  };
+
+  const swapsKey = `swaps_${date}`;
+  const bucket   = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
+  bucket.value.push(newEx);
+  await put('meta', bucket);
+  state.meta[swapsKey] = bucket;
+
+  renderToday();
+  showToast(`Added "${newEx.name}".`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1709,6 +1800,8 @@ async function handleImport(event) {
         ]);
 
         await loadState();
+        await recalculateStreak();
+        state.ui.viewedDate = state.ui.today;
         render();
         showToast('Data imported successfully.');
       } catch (err) {
@@ -1736,6 +1829,7 @@ async function handleClearData() {
         state.bodyweight            = [];
         state.meta                  = {};
         state.ui.expandedExerciseId = null;
+        state.ui.viewedDate         = state.ui.today;
 
         await seedIfFirstRun();
         render();

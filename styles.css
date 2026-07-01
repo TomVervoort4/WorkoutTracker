@@ -705,6 +705,40 @@ a { color: var(--color-accent); text-decoration: none; }
   color: var(--color-border-muted);
 }
 
+/* Viewing-a-different-date banner */
+.viewing-date-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background-color: var(--color-accent-dim);
+  border: 1px solid var(--color-accent-glow);
+  border-radius: var(--radius-md);
+}
+
+.viewing-date-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.back-to-today-btn {
+  padding: 4px 0;
+  color: var(--color-accent);
+}
+
+/* Add-exercise row */
+.add-exercise-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 16px;
+}
+
+.add-exercise-btn {
+  font-size: 13px;
+}
+
 /* Finish session row */
 .finish-session-row {
   padding: 4px 0 8px;
@@ -1342,6 +1376,20 @@ a { color: var(--color-accent); text-decoration: none; }
   background-color: var(--color-accent-dim);
   border-radius: var(--radius-sm);
   padding: 2px 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* "Added" / "Swapped" origin tag inside exercise header */
+.ex-origin-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--color-secondary);
+  padding: 2px 6px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   flex-shrink: 0;
 }
