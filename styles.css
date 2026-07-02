@@ -1452,3 +1452,120 @@ a { color: var(--color-accent); text-decoration: none; }
 .remove-ex-btn:active {
   color: var(--color-danger);
 }
+
+/* ═══════════════════════════════════════════════════════
+   INSIGHTS TAB
+═══════════════════════════════════════════════════════ */
+.insights-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-bottom: 8px;
+}
+
+.insights-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.insights-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--color-secondary);
+  padding: 0 4px;
+}
+
+.insight-card {
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.insight-card-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 40px 14px 14px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.insight-card-tone {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.insight-tone-progressing { background-color: var(--color-success); }
+.insight-tone-regressing  { background-color: var(--color-danger); }
+.insight-tone-holding     { background-color: var(--color-warning); }
+.insight-tone-pb          { background-color: var(--color-accent); }
+.insight-tone-info        { background-color: var(--color-secondary); }
+
+.insight-card-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.insight-card-header .chevron-icon {
+  color: var(--color-secondary);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.insight-card-header[aria-expanded="true"] .chevron-icon {
+  transform: rotate(180deg);
+}
+
+.insight-card-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.2s ease;
+}
+
+.insight-card-body.expanded {
+  max-height: 240px;
+}
+
+.insight-card-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text);
+  padding: 0 14px 14px;
+}
+
+.insight-card-subtext {
+  display: block;
+  margin-top: 4px;
+  color: var(--color-secondary);
+  font-size: 12px;
+}
+
+.insight-card-dismiss {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--color-secondary);
+  background: none;
+  border: none;
+}
+
+.insight-card-dismiss:active {
+  background-color: var(--color-surface-2);
+  color: var(--color-text);
+}

@@ -240,6 +240,41 @@
 
     </section>
 
+    <!-- ── INSIGHTS TAB ── -->
+    <section class="tab-view" id="view-insights" role="tabpanel" aria-label="Insights" hidden>
+
+      <div class="section-header">
+        <h2 class="section-title">Insights</h2>
+      </div>
+      <p class="section-sub">Rule-based signals from your own logged history. Facts, not coaching.</p>
+
+      <!-- JS renders grouped insight cards here -->
+      <div class="insights-groups" id="insights-groups">
+        <!-- Example structure JS will produce:
+        <div class="insights-group" data-module="progression">
+          <h3 class="insights-group-title">Progression</h3>
+          <div class="card insight-card" data-card-id="progression_ex_seed_bench_press_2026-06-30">
+            <button class="insight-card-header" aria-expanded="true">
+              <span class="insight-card-tone insight-tone-progressing"></span>
+              <span class="insight-card-title">Bench Press</span>
+              <svg class="chevron-icon" ...chevron... />
+            </button>
+            <div class="insight-card-body expanded">
+              <p class="insight-card-text">Bench e1RM: 92kg, +2.5kg vs your last 3 sessions</p>
+            </div>
+            <button class="insight-card-dismiss" aria-label="Dismiss">
+              <svg ...x... />
+            </button>
+          </div>
+        </div>
+        -->
+      </div>
+      <p class="chart-empty" id="insights-empty" hidden>
+        No insights yet. Log a few sessions and check back here.
+      </p>
+
+    </section>
+
     <!-- ── DATA TAB ── -->
     <section class="tab-view" id="view-data" role="tabpanel" aria-label="Data management" hidden>
 
@@ -319,6 +354,13 @@
         <line x1="3" y1="10" x2="21" y2="10"/>
       </svg>
       <span>Plan</span>
+    </button>
+    <button class="nav-tab" data-view="insights" aria-label="Insights" aria-selected="false" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 8v4l3 2"/>
+      </svg>
+      <span>Insights</span>
     </button>
     <button class="nav-tab" data-view="data" aria-label="Data management" aria-selected="false" role="tab">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

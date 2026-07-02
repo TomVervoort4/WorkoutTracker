@@ -7,6 +7,7 @@
  */
 
 import { get, put, del, getAll, clear } from './db.js';
+import { renderInsightsTab, checkForNewPB } from './insights.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -24,6 +25,10 @@ const STREAK_KEY           = 'streak';
 const FINISHED_KEY         = 'finishedSessions';
 const BW_PROMPT_KEY        = 'bwPromptDate';
 const MIN_SESSIONS_PER_WEEK = 3; // weeks with >= this many logged sessions advance streak
+
+// Shown for any exercise record whose name is missing or was never
+// migrated off its internal id (see migrateUnnamedExercises()).
+const UNNAMED_EXERCISE_PLACEHOLDER = 'Unnamed exercise';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  DATE UTILITIES
@@ -136,7 +141,7 @@ const state = {
 
   /** Transient UI state — never written to IndexedDB. */
   ui: {
-    currentView: 'today',         // 'today' | 'progress' | 'plan' | 'data'
+    currentView: 'today',         // 'today' | 'progress' | 'plan' | 'insights' | 'data'
     today: '',                    // 'YYYY-MM-DD'
     weekDates: [],                // [Mon … Sun] date strings for current week
     todayDayIndex: 0,             // 0=Mon … 6=Sun
@@ -469,6 +474,38 @@ async function seedIfFirstRun() {
   state.meta[BW_PROMPT_KEY] = bwPromptDoc;
 }
 
+/**
+ * One-time repair for swap/added exercise extras stored before the naming
+ * bug was fixed: any extra whose `name` is blank or still equal to its
+ * internal `id` gets a chance to be renamed, or falls back to a readable
+ * placeholder. Self-limiting — once repaired, records no longer match the
+ * broken condition, so this is a no-op on subsequent app loads.
+ */
+async function migrateUnnamedExercises() {
+  for (const key in state.meta) {
+    if (!key.startsWith('swaps_')) continue;
+    const doc = state.meta[key];
+    const extras = doc?.value ?? [];
+    let dirty = false;
+
+    for (const extra of extras) {
+      const isUnnamed = !extra.name?.trim() || extra.name === extra.id;
+      if (!isUnnamed) continue;
+
+      const renamed = window.prompt(
+        `An exercise is missing its name. Enter a name for it now (or leave blank to label it "${UNNAMED_EXERCISE_PLACEHOLDER}"):`
+      );
+      extra.name = renamed?.trim() || UNNAMED_EXERCISE_PLACEHOLDER;
+      dirty = true;
+    }
+
+    if (dirty) {
+      await put('meta', doc);
+      state.meta[key] = doc;
+    }
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  RENDER DISPATCH
 // ─────────────────────────────────────────────────────────────────────────────
@@ -483,10 +520,11 @@ function render() {
   renderWeekStrip();
 
   switch (state.ui.currentView) {
-    case 'today':    renderToday();    break;
-    case 'progress': renderProgress(); break;
-    case 'plan':     renderPlan();     break;
-    case 'data':     renderData();     break;
+    case 'today':    renderToday();        break;
+    case 'progress': renderProgress();     break;
+    case 'plan':     renderPlan();         break;
+    case 'insights': renderInsightsTab(state); break;
+    case 'data':     renderData();         break;
   }
 }
 
@@ -646,6 +684,9 @@ async function init() {
 
   // 3. Write defaults to the DB on the very first launch
   await seedIfFirstRun();
+
+  // 3b. One-time repair for any pre-existing unnamed swap/added exercises
+  await migrateUnnamedExercises();
 
   // 4. Bottom tab navigation
   document.querySelectorAll('.nav-tab').forEach(btn => {
@@ -838,16 +879,29 @@ async function unremoveId(date, exerciseId) {
   state.meta[key] = doc;
 }
 
-/** Resolves a display name for an exerciseId from the plan or from swap log entries. */
+/**
+ * Resolves a display name for an exerciseId — from the recurring plan, or
+ * from a session-scoped swap/add extra (stored per-date under `swaps_<date>`
+ * meta keys, searched across all dates since an exercise logged on one date
+ * may be looked up from anywhere, e.g. the Progress tab history selector).
+ * Never returns the raw internal id.
+ */
 function getExerciseName(exerciseId) {
   if (state.plan) {
     for (const day of state.plan.days) {
       const ex = day.exercises?.find(e => e.id === exerciseId);
-      if (ex) return ex.name;
+      if (ex?.name) return ex.name;
     }
   }
+  for (const key in state.meta) {
+    if (!key.startsWith('swaps_')) continue;
+    const extra = state.meta[key]?.value?.find(e => e.id === exerciseId);
+    if (extra?.name) return extra.name;
+  }
   const swapLog = state.logs.find(l => l.exerciseId === exerciseId && l.substituteName);
-  return swapLog?.substituteName ?? exerciseId;
+  if (swapLog?.substituteName) return swapLog.substituteName;
+
+  return UNNAMED_EXERCISE_PLACEHOLDER;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1196,6 +1250,12 @@ async function handleSetCheck(exerciseId, setIndex, date) {
   const rVal = rRaw ? parseInt(rRaw)   || log?.reps   || null : log?.reps;
 
   await writeLog(date, exerciseId, setIndex, { weight: wVal, reps: rVal, done: newDone });
+
+  // Immediate PB surfacing — check the moment a set is marked done, not retroactively
+  if (newDone && wVal != null) {
+    const pbMessage = await checkForNewPB(state, exerciseId, getExerciseName(exerciseId), date);
+    if (pbMessage) showToast(pbMessage, 4000);
+  }
 
   // Targeted DOM update — avoids clearing any other set's live input values
   if (setRow) {
