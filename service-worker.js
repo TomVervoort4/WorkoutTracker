@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const CACHE_NAME = `fittrack-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -6,7 +6,10 @@ const APP_SHELL = [
   "./styles.css",
   "./app.js",
   "./db.js",
-  "./manifest.webmanifest"
+  "./insights.js",
+  "./manifest.webmanifest",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png"
 ];
 
 // Pre-cache all app shell assets on install (used as the offline fallback)

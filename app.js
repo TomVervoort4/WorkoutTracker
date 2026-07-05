@@ -147,6 +147,7 @@ const state = {
     todayDayIndex: 0,             // 0=Mon … 6=Sun
     viewedDate: '',               // 'YYYY-MM-DD' — date shown in the Today/day-view tab
     expandedExerciseId: null,     // exercise ID whose accordion is open, or null
+    planDirty: false,             // Plan tab has edits not yet saved to the DB
     _dialogConfirmCallback: null, // pending confirm action
   },
 };
@@ -534,6 +535,16 @@ function render() {
 
 function switchView(viewName) {
   if (state.ui.currentView === viewName) return;
+
+  // Plan edits only persist on explicit Save — confirm before discarding them
+  if (state.ui.currentView === 'plan' && state.ui.planDirty) {
+    showDialog('You have unsaved plan changes. Discard them?', () => {
+      state.ui.planDirty = false;
+      switchView(viewName);
+    });
+    return;
+  }
+
   state.ui.currentView = viewName;
   state.ui.expandedExerciseId = null; // collapse open accordions on tab change
 
@@ -671,6 +682,10 @@ function handleBackToToday() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function init() {
+  // 0. Ask the browser to protect IndexedDB from eviction under storage
+  //    pressure — all training history lives there with no server copy.
+  navigator.storage?.persist?.().catch(() => {});
+
   // 1. Resolve today's position in the calendar
   const today      = todayStr();
   const weekDates  = weekDatesOf(new Date());
@@ -714,6 +729,10 @@ async function init() {
 
   // 7b. Back-to-today banner button
   document.getElementById('back-to-today-btn').addEventListener('click', handleBackToToday);
+
+  // 7c. Rest timer controls
+  document.getElementById('rest-timer-extend').addEventListener('click', () => extendRestTimer(30));
+  document.getElementById('rest-timer-skip').addEventListener('click', stopRestTimer);
 
   // 8. Data tab actions
   document.getElementById('export-btn').addEventListener('click', handleExport);
@@ -762,16 +781,110 @@ function showToast(message, duration = 2800) {
   _toastTimer = setTimeout(() => el.classList.remove('toast-show'), duration);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  REST TIMER
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REST_TIMER_SECONDS = 90;
+
+// endsAt-based countdown — survives background-tab interval throttling
+const _restTimer = { interval: null, endsAt: 0 };
+
+function formatTimerSeconds(s) {
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function updateRestTimerDisplay() {
+  const remaining = Math.max(0, Math.round((_restTimer.endsAt - Date.now()) / 1000));
+  document.getElementById('rest-timer-count').textContent = formatTimerSeconds(remaining);
+  return remaining;
+}
+
+function startRestTimer() {
+  clearInterval(_restTimer.interval);
+  _restTimer.endsAt = Date.now() + REST_TIMER_SECONDS * 1000;
+  document.getElementById('rest-timer').hidden = false;
+  updateRestTimerDisplay();
+  _restTimer.interval = setInterval(() => {
+    if (updateRestTimerDisplay() <= 0) {
+      stopRestTimer();
+      navigator.vibrate?.(200);
+      showToast('Rest over — next set!');
+    }
+  }, 1000);
+}
+
+function stopRestTimer() {
+  clearInterval(_restTimer.interval);
+  _restTimer.interval = null;
+  document.getElementById('rest-timer').hidden = true;
+}
+
+function extendRestTimer(seconds = 30) {
+  if (!_restTimer.interval) return;
+  _restTimer.endsAt += seconds * 1000;
+  updateRestTimerDisplay();
+}
+
 function showDialog(message, onConfirm) {
+  const confirmBtn = document.getElementById('dialog-confirm-btn');
+  confirmBtn.textContent = 'Confirm';
+  confirmBtn.className   = 'btn-danger';
+  document.getElementById('dialog-inputs').hidden = true;
   document.getElementById('dialog-message').textContent = message;
   state.ui._dialogConfirmCallback = onConfirm;
-  const overlay = document.getElementById('dialog-overlay');
-  overlay.hidden = false;
-  document.getElementById('dialog-confirm-btn').focus();
+  document.getElementById('dialog-overlay').hidden = false;
+  confirmBtn.focus();
+}
+
+/**
+ * Confirm dialog variant with input fields, replacing window.prompt chains.
+ * `fields`: [{ name, label, placeholder?, type?, inputmode?, value? }].
+ * `onSubmit` receives { fieldName: trimmedValue, … } when confirmed.
+ */
+function showFormDialog(message, fields, onSubmit, confirmLabel = 'Save') {
+  const confirmBtn = document.getElementById('dialog-confirm-btn');
+  confirmBtn.textContent = confirmLabel;
+  confirmBtn.className   = 'btn-primary';
+  document.getElementById('dialog-message').textContent = message;
+
+  const wrap = document.getElementById('dialog-inputs');
+  wrap.innerHTML = fields.map(f => `
+    <div class="dialog-field">
+      <label class="dialog-input-label" for="dialog-field-${escHtml(f.name)}">${escHtml(f.label)}</label>
+      <input class="dialog-input"
+             id="dialog-field-${escHtml(f.name)}"
+             type="${escHtml(f.type ?? 'text')}"
+             ${f.inputmode ? `inputmode="${escHtml(f.inputmode)}"` : ''}
+             value="${escHtml(f.value ?? '')}"
+             placeholder="${escHtml(f.placeholder ?? '')}"
+             data-field="${escHtml(f.name)}" />
+    </div>`).join('');
+  wrap.hidden = false;
+
+  wrap.querySelectorAll('.dialog-input').forEach(input => {
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') confirmBtn.click();
+    });
+  });
+
+  state.ui._dialogConfirmCallback = () => {
+    const values = {};
+    wrap.querySelectorAll('.dialog-input').forEach(i => {
+      values[i.dataset.field] = i.value.trim();
+    });
+    onSubmit(values);
+  };
+
+  document.getElementById('dialog-overlay').hidden = false;
+  wrap.querySelector('.dialog-input')?.focus();
 }
 
 function closeDialog() {
   document.getElementById('dialog-overlay').hidden = true;
+  const wrap = document.getElementById('dialog-inputs');
+  wrap.innerHTML = '';
+  wrap.hidden = true;
   state.ui._dialogConfirmCallback = null;
 }
 
@@ -1240,16 +1353,41 @@ async function handleSetCheck(exerciseId, setIndex, date) {
   const wasDone = log?.done ?? false;
   const newDone = !wasDone;
 
+  const { allExercises: allPlannedEx } = resolveExercisesForDate(date);
+  const exDef = allPlannedEx.find(e => e.id === exerciseId);
+
   // Read the live DOM inputs before saving so unsaved keystrokes aren't lost
   const setRow = document.querySelector(
     `.set-row[data-ex-id="${exerciseId}"][data-set-index="${setIndex}"]`
   );
   const wRaw = setRow?.querySelector('.set-weight')?.value;
   const rRaw = setRow?.querySelector('.set-reps')?.value;
-  const wVal = wRaw ? parseFloat(wRaw) || log?.weight || null : log?.weight;
-  const rVal = rRaw ? parseInt(rRaw)   || log?.reps   || null : log?.reps;
+  let wVal = wRaw ? parseFloat(wRaw) || log?.weight || null : log?.weight ?? null;
+  let rVal = rRaw ? parseInt(rRaw)   || log?.reps   || null : log?.reps   ?? null;
+
+  // Checking a set with empty inputs auto-fills from the previous session
+  // (falling back to the plan's rep target) — most sets repeat last week's
+  // numbers, and a null weight would break PRs, volume, and history.
+  if (newDone) {
+    const prevLogs = getRecentLogsForExercise(exerciseId, date);
+    const prev = prevLogs.find(p => p.setIndex === setIndex)
+      ?? prevLogs[prevLogs.length - 1]
+      ?? null;
+    // A set already done today outranks last session — it reflects today's
+    // actual working weight (and covers first-ever sessions with no history)
+    const sameDaySets = state.logs
+      .filter(l => l.exerciseId === exerciseId && l.date === date && l.done && l.setIndex !== setIndex)
+      .sort((a, b) => a.setIndex - b.setIndex);
+    const sameDay = sameDaySets[sameDaySets.length - 1] ?? null;
+    if (wVal == null) wVal = sameDay?.weight ?? prev?.weight ?? null;
+    if (rVal == null) rVal = sameDay?.reps ?? prev?.reps ?? (parseInt(exDef?.reps, 10) || null);
+  }
 
   await writeLog(date, exerciseId, setIndex, { weight: wVal, reps: rVal, done: newDone });
+
+  // Start the rest countdown the moment a set is marked done
+  if (newDone) startRestTimer();
+  else stopRestTimer();
 
   // Immediate PB surfacing — check the moment a set is marked done, not retroactively
   if (newDone && wVal != null) {
@@ -1262,11 +1400,17 @@ async function handleSetCheck(exerciseId, setIndex, date) {
     setRow.classList.toggle('set-logged', newDone);
     const checkBtn = setRow.querySelector('.set-check');
     if (checkBtn) checkBtn.setAttribute('aria-pressed', String(newDone));
+
+    // Show any auto-filled values so the user sees what was logged
+    if (newDone) {
+      const wInput = setRow.querySelector('.set-weight');
+      const rInput = setRow.querySelector('.set-reps');
+      if (wInput && !wInput.value && wVal != null) wInput.value = wVal;
+      if (rInput && !rInput.value && rVal != null) rInput.value = rVal;
+    }
   }
 
   // Update exercise card's overall completion marker
-  const { allExercises: allPlannedEx } = resolveExercisesForDate(date);
-  const exDef    = allPlannedEx.find(e => e.id === exerciseId);
   const totalSets = exDef?.sets ?? setIndex + 1;
   const complete  = isExerciseComplete(exerciseId, date, totalSets);
   const card = document.querySelector(`.exercise-card[data-exercise-id="${exerciseId}"]`);
@@ -1327,6 +1471,7 @@ async function handleFinishSession(date) {
 
   await recalculateStreak();
 
+  stopRestTimer();
   document.getElementById('finish-session-row').hidden = true;
   renderWeekStrip();
   renderHeader();
@@ -1376,69 +1521,78 @@ async function recalculateStreak() {
   state.meta[STREAK_KEY] = updated;
 }
 
-async function promptMidWorkoutSwap(originalId, originalName, date) {
-  const name = window.prompt(
-    `Swapping "${originalName}".\nEnter substitute exercise name:`
+function promptMidWorkoutSwap(originalId, originalName, date) {
+  showFormDialog(
+    `Swap "${originalName}" for another exercise this session.`,
+    [{ name: 'name', label: 'Substitute exercise', placeholder: 'e.g. Machine Press' }],
+    async ({ name }) => {
+      if (!name) return;
+
+      const dayIdx  = dayIndexOf(date);
+      const origEx  = state.plan?.days[dayIdx]?.exercises?.find(e => e.id === originalId);
+      const swapEx  = {
+        id:         generateId('swap'),
+        name,
+        sets:       origEx?.sets ?? 3,
+        reps:       origEx?.reps ?? '8',
+        muscles:    '',
+        cue:        '',
+        isSwap:     true,
+        originalId,
+      };
+
+      const swapsKey = `swaps_${date}`;
+      const swapDoc  = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
+      swapDoc.value.push(swapEx);
+      await put('meta', swapDoc);
+      state.meta[swapsKey] = swapDoc;
+
+      // Fully replace — hide the original from this date's session
+      await addRemovedId(date, originalId);
+
+      renderToday();
+      renderWeekStrip();
+      showToast(`Swapped to "${swapEx.name}".`);
+    },
+    'Swap'
   );
-  if (!name?.trim()) return;
-
-  const dayIdx  = dayIndexOf(date);
-  const origEx  = state.plan?.days[dayIdx]?.exercises?.find(e => e.id === originalId);
-  const swapId  = generateId('swap');
-  const swapEx  = {
-    id:         swapId,
-    name:       name.trim(),
-    sets:       origEx?.sets ?? 3,
-    reps:       origEx?.reps ?? '8',
-    muscles:    '',
-    cue:        '',
-    isSwap:     true,
-    originalId,
-  };
-
-  const swapsKey = `swaps_${date}`;
-  const swapDoc  = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
-  swapDoc.value.push(swapEx);
-  await put('meta', swapDoc);
-  state.meta[swapsKey] = swapDoc;
-
-  // Fully replace — hide the original from this date's session
-  await addRemovedId(date, originalId);
-
-  renderToday();
-  renderWeekStrip();
-  showToast(`Swapped to "${swapEx.name}".`);
 }
 
 /** Adds a one-off, session-scoped exercise to a date's session (not the recurring plan). */
-async function handleAddExercise(date) {
-  const name = window.prompt('Add exercise — enter its name:');
-  if (!name?.trim()) return;
+function handleAddExercise(date) {
+  showFormDialog(
+    'Add a one-off exercise to this session.',
+    [
+      { name: 'name', label: 'Exercise name', placeholder: 'e.g. Cable Fly' },
+      { name: 'sets', label: 'Sets', type: 'number', inputmode: 'numeric', value: '3' },
+      { name: 'reps', label: 'Reps target', value: '8' },
+    ],
+    async ({ name, sets, reps }) => {
+      if (!name) return;
 
-  const setsRaw = window.prompt('Sets (default 3):', '3');
-  const sets    = parseInt(setsRaw, 10) || 3;
-  const reps    = window.prompt('Reps target (default 8):', '8')?.trim() || '8';
+      const newEx = {
+        id:         generateId('added'),
+        name,
+        sets:       parseInt(sets, 10) || 3,
+        reps:       reps || '8',
+        muscles:    '',
+        cue:        '',
+        isAdded:    true,
+        originalId: null,
+      };
 
-  const newEx = {
-    id:         generateId('added'),
-    name:       name.trim(),
-    sets,
-    reps,
-    muscles:    '',
-    cue:        '',
-    isAdded:    true,
-    originalId: null,
-  };
+      const swapsKey = `swaps_${date}`;
+      const bucket   = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
+      bucket.value.push(newEx);
+      await put('meta', bucket);
+      state.meta[swapsKey] = bucket;
 
-  const swapsKey = `swaps_${date}`;
-  const bucket   = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
-  bucket.value.push(newEx);
-  await put('meta', bucket);
-  state.meta[swapsKey] = bucket;
-
-  renderToday();
-  renderWeekStrip();
-  showToast(`Added "${newEx.name}".`);
+      renderToday();
+      renderWeekStrip();
+      showToast(`Added "${newEx.name}".`);
+    },
+    'Add'
+  );
 }
 
 /**
@@ -1700,6 +1854,7 @@ function renderPlan() {
 
   container.innerHTML = state.plan.days.map(day => buildPlanDayCardHTML(day)).join('');
   wirePlanInteractions();
+  state.ui.planDirty = false; // DOM was just rebuilt from saved state
 }
 
 function buildPlanDayCardHTML(day) {
@@ -1758,6 +1913,12 @@ function wirePlanInteractions() {
   const container = document.getElementById('plan-days');
   document.getElementById('save-plan-btn').onclick = handleSavePlan;
 
+  // Any typing in a plan field marks the tab dirty (delegated, wired once)
+  if (!container._dirtyWired) {
+    container.addEventListener('input', () => { state.ui.planDirty = true; });
+    container._dirtyWired = true;
+  }
+
   // "Add exercise" — inserts a new row directly into the list without rebuilding
   container.querySelectorAll('.plan-add-ex-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1791,6 +1952,7 @@ function wirePlanInteractions() {
         </button>`;
       list.appendChild(row);
       wireRemoveButton(row.querySelector('.plan-ex-remove'));
+      state.ui.planDirty = true;
       row.querySelector('.plan-ex-name').focus();
     });
   });
@@ -1800,7 +1962,10 @@ function wirePlanInteractions() {
 }
 
 function wireRemoveButton(btn) {
-  btn.addEventListener('click', () => btn.closest('.plan-exercise-row')?.remove());
+  btn.addEventListener('click', () => {
+    btn.closest('.plan-exercise-row')?.remove();
+    state.ui.planDirty = true;
+  });
 }
 
 async function handleSavePlan() {
@@ -1855,6 +2020,7 @@ async function handleSavePlan() {
   const updated = { ...state.plan, days: updatedDays };
   await put('plan', updated);
   state.plan = updated;
+  state.ui.planDirty = false;
 
   showToast('Plan saved.');
   renderWeekStrip();

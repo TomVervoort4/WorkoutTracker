@@ -373,6 +373,24 @@
   </nav>
 
   <!-- ═══════════════════════════════════════════
+       REST TIMER BAR
+  ═══════════════════════════════════════════ -->
+  <div class="rest-timer" id="rest-timer" hidden role="timer" aria-label="Rest timer">
+    <div class="rest-timer-label">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 8v4l3 2"/>
+      </svg>
+      <span>Rest</span>
+    </div>
+    <span class="rest-timer-count" id="rest-timer-count">1:30</span>
+    <div class="rest-timer-actions">
+      <button class="rest-timer-btn" id="rest-timer-extend" aria-label="Add 30 seconds">+30s</button>
+      <button class="rest-timer-btn" id="rest-timer-skip" aria-label="Skip rest timer">Skip</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
        TOAST NOTIFICATION
   ═══════════════════════════════════════════ -->
   <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -383,6 +401,7 @@
   <div class="dialog-overlay" id="dialog-overlay" hidden aria-modal="true" role="dialog">
     <div class="dialog-box">
       <p class="dialog-message" id="dialog-message"></p>
+      <div class="dialog-inputs" id="dialog-inputs" hidden></div>
       <div class="dialog-actions">
         <button class="btn-secondary" id="dialog-cancel-btn">Cancel</button>
         <button class="btn-danger" id="dialog-confirm-btn">Confirm</button>
