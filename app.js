@@ -21,10 +21,11 @@ const MONTH_NAMES     = [
 ];
 
 const PLAN_DOC_ID          = 'weekly-plan';
-const STREAK_KEY           = 'streak';
 const FINISHED_KEY         = 'finishedSessions';
-const BW_PROMPT_KEY        = 'bwPromptDate';
-const MIN_SESSIONS_PER_WEEK = 3; // weeks with >= this many logged sessions advance streak
+
+// Meta keys from retired features (streak counter, fixed-Monday bodyweight
+// prompt) — silently deleted from the DB on load, never written again.
+const RETIRED_META_KEYS = ['streak', 'bwPromptDate'];
 
 // Shown for any exercise record whose name is missing or was never
 // migrated off its internal id (see migrateUnnamedExercises()).
@@ -135,7 +136,7 @@ const state = {
 
   /**
    * Map of key → record from the 'meta' store.
-   * Keys in use: STREAK_KEY, FINISHED_KEY, BW_PROMPT_KEY.
+   * Keys in use: FINISHED_KEY, plus per-date `swaps_<date>` / `removed_<date>`.
    */
   meta: {},
 
@@ -451,28 +452,63 @@ async function seedIfFirstRun() {
   await put('plan', defaultPlan);
   state.plan = defaultPlan;
 
-  const streakDoc = {
-    key: STREAK_KEY,
-    count: 0,
-    lastCompletedWeek: null,
-    weekHistory: {}, // weekStr → sessionCount, used for streak recalculation
-  };
-  await put('meta', streakDoc);
-  state.meta[STREAK_KEY] = streakDoc;
-
   const finishedDoc = {
     key: FINISHED_KEY,
     value: {}, // dateStr → true, marks explicitly finished sessions
   };
   await put('meta', finishedDoc);
   state.meta[FINISHED_KEY] = finishedDoc;
+}
 
-  const bwPromptDoc = {
-    key: BW_PROMPT_KEY,
-    value: null, // 'YYYY-MM-DD' of last date bw prompt was shown or completed
-  };
-  await put('meta', bwPromptDoc);
-  state.meta[BW_PROMPT_KEY] = bwPromptDoc;
+/**
+ * Drops meta records left behind by retired features (streak counter,
+ * fixed-Monday bodyweight prompt). No backfill or conversion — the data
+ * is simply discarded. No-op once cleaned.
+ */
+async function dropRetiredMeta() {
+  for (const key of RETIRED_META_KEYS) {
+    if (!state.meta[key]) continue;
+    await del('meta', key);
+    delete state.meta[key];
+  }
+}
+
+/**
+ * Ensures every exercise definition (recurring plan + session-scoped extras)
+ * carries a `unit` field: 'reps' (default) or 'seconds'. Plank and Dead Bug
+ * are duration-based and get 'seconds'; their historical logged values were
+ * always seconds, so no value conversion is needed — only the label changes.
+ * No-op once every definition has a unit.
+ */
+async function migrateExerciseUnits() {
+  const SECONDS_BY_DEFAULT = /^(plank|dead ?bug)$/i;
+  const unitFor = ex =>
+    SECONDS_BY_DEFAULT.test((ex.name ?? '').trim()) ? 'seconds' : 'reps';
+
+  let planDirty = false;
+  for (const day of state.plan?.days ?? []) {
+    for (const ex of day.exercises ?? []) {
+      if (ex.unit) continue;
+      ex.unit = unitFor(ex);
+      planDirty = true;
+    }
+  }
+  if (planDirty) await put('plan', state.plan);
+
+  for (const key in state.meta) {
+    if (!key.startsWith('swaps_')) continue;
+    const doc = state.meta[key];
+    let dirty = false;
+    for (const extra of doc?.value ?? []) {
+      if (extra.unit) continue;
+      extra.unit = unitFor(extra);
+      dirty = true;
+    }
+    if (dirty) {
+      await put('meta', doc);
+      state.meta[key] = doc;
+    }
+  }
 }
 
 /**
@@ -572,13 +608,6 @@ function renderHeader() {
     DAY_NAMES_LONG[state.ui.todayDayIndex];
   document.getElementById('header-date').textContent =
     friendlyDateLabel(state.ui.today);
-
-  const streakRecord = state.meta[STREAK_KEY];
-  const streakCount  = streakRecord?.count ?? 0;
-  const badge        = document.getElementById('streak-badge');
-
-  document.getElementById('streak-count').textContent = String(streakCount);
-  badge.classList.toggle('streak-zero', streakCount === 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -703,6 +732,11 @@ async function init() {
   // 3b. One-time repair for any pre-existing unnamed swap/added exercises
   await migrateUnnamedExercises();
 
+  // 3c. Drop retired streak / Monday-prompt meta, ensure every exercise
+  //     definition has a unit ('reps' | 'seconds')
+  await dropRetiredMeta();
+  await migrateExerciseUnits();
+
   // 4. Bottom tab navigation
   document.querySelectorAll('.nav-tab').forEach(btn => {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
@@ -826,6 +860,73 @@ function extendRestTimer(seconds = 30) {
   updateRestTimerDisplay();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  DURATION TIMER — stopwatch for seconds-based sets (plank, dead bug, …)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DURATION_PLAY_SVG =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20"/></svg>';
+const DURATION_STOP_SVG =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>';
+
+// startedAt-based count-up — survives background-tab interval throttling
+const _durationTimer = { interval: null, btn: null, input: null, startedAt: 0 };
+
+function durationTimerElapsed() {
+  return Math.round((Date.now() - _durationTimer.startedAt) / 1000);
+}
+
+/**
+ * Stops the running set stopwatch, restores its button, and leaves the
+ * elapsed seconds in the input. Returns the elapsed seconds (0 if idle).
+ */
+function stopDurationTimer() {
+  if (!_durationTimer.interval) return 0;
+  clearInterval(_durationTimer.interval);
+  const elapsed = durationTimerElapsed();
+  const { btn, input } = _durationTimer;
+  if (btn?.isConnected) {
+    btn.innerHTML = DURATION_PLAY_SVG;
+    btn.setAttribute('aria-pressed', 'false');
+    btn.classList.remove('set-timer-running');
+  }
+  if (input?.isConnected) input.value = String(elapsed);
+  _durationTimer.interval = null;
+  _durationTimer.btn = null;
+  _durationTimer.input = null;
+  return elapsed;
+}
+
+function startDurationTimer(btn, input) {
+  stopDurationTimer(); // only one hold can be timed at a time
+  _durationTimer.btn       = btn;
+  _durationTimer.input     = input;
+  _durationTimer.startedAt = Date.now();
+  btn.innerHTML = DURATION_STOP_SVG;
+  btn.setAttribute('aria-pressed', 'true');
+  btn.classList.add('set-timer-running');
+  input.value = '0';
+  _durationTimer.interval = setInterval(() => {
+    if (!input.isConnected) { stopDurationTimer(); return; }
+    input.value = String(durationTimerElapsed());
+  }, 250);
+}
+
+function handleDurationTimerClick(btn, date) {
+  const setRow = btn.closest('.set-row');
+  const input  = setRow?.querySelector('.set-reps');
+  if (!input) return;
+
+  if (_durationTimer.btn === btn) {
+    const secs = stopDurationTimer();
+    if (secs > 0) {
+      writeLog(date, btn.dataset.exId, parseInt(btn.dataset.setIndex, 10), { reps: secs });
+    }
+  } else {
+    startDurationTimer(btn, input);
+  }
+}
+
 function showDialog(message, onConfirm) {
   const confirmBtn = document.getElementById('dialog-confirm-btn');
   confirmBtn.textContent = 'Confirm';
@@ -839,8 +940,9 @@ function showDialog(message, onConfirm) {
 
 /**
  * Confirm dialog variant with input fields, replacing window.prompt chains.
- * `fields`: [{ name, label, placeholder?, type?, inputmode?, value? }].
- * `onSubmit` receives { fieldName: trimmedValue, … } when confirmed.
+ * `fields`: [{ name, label, placeholder?, type?, inputmode?, value? }] for
+ * text inputs, or [{ name, label, options: [{value, label}], value? }] for
+ * a select. `onSubmit` receives { fieldName: trimmedValue, … } when confirmed.
  */
 function showFormDialog(message, fields, onSubmit, confirmLabel = 'Save') {
   const confirmBtn = document.getElementById('dialog-confirm-btn');
@@ -849,17 +951,29 @@ function showFormDialog(message, fields, onSubmit, confirmLabel = 'Save') {
   document.getElementById('dialog-message').textContent = message;
 
   const wrap = document.getElementById('dialog-inputs');
-  wrap.innerHTML = fields.map(f => `
+  wrap.innerHTML = fields.map(f => {
+    const control = f.options
+      ? `<select class="dialog-input"
+                 id="dialog-field-${escHtml(f.name)}"
+                 data-field="${escHtml(f.name)}">
+           ${f.options.map(o => `
+             <option value="${escHtml(o.value)}"${o.value === f.value ? ' selected' : ''}>
+               ${escHtml(o.label)}
+             </option>`).join('')}
+         </select>`
+      : `<input class="dialog-input"
+                id="dialog-field-${escHtml(f.name)}"
+                type="${escHtml(f.type ?? 'text')}"
+                ${f.inputmode ? `inputmode="${escHtml(f.inputmode)}"` : ''}
+                value="${escHtml(f.value ?? '')}"
+                placeholder="${escHtml(f.placeholder ?? '')}"
+                data-field="${escHtml(f.name)}" />`;
+    return `
     <div class="dialog-field">
       <label class="dialog-input-label" for="dialog-field-${escHtml(f.name)}">${escHtml(f.label)}</label>
-      <input class="dialog-input"
-             id="dialog-field-${escHtml(f.name)}"
-             type="${escHtml(f.type ?? 'text')}"
-             ${f.inputmode ? `inputmode="${escHtml(f.inputmode)}"` : ''}
-             value="${escHtml(f.value ?? '')}"
-             placeholder="${escHtml(f.placeholder ?? '')}"
-             data-field="${escHtml(f.name)}" />
-    </div>`).join('');
+      ${control}
+    </div>`;
+  }).join('');
   wrap.hidden = false;
 
   wrap.querySelectorAll('.dialog-input').forEach(input => {
@@ -922,13 +1036,17 @@ async function writeLog(date, exerciseId, setIndex, fields) {
   return entry;
 }
 
-/** Most recent completed logs for an exercise on any date strictly before excludeDate. */
+/**
+ * Most recent completed logs for an exercise on any date strictly before
+ * excludeDate. Requires weight OR reps so duration-only sets (e.g. an
+ * unweighted plank hold) still surface as a last-time reference.
+ */
 function getRecentLogsForExercise(exerciseId, excludeDate) {
   const done = state.logs.filter(l =>
     l.exerciseId === exerciseId &&
     l.date < excludeDate &&
     l.done &&
-    l.weight != null
+    (l.weight != null || l.reps != null)
   );
   if (!done.length) return [];
   done.sort((a, b) => b.date.localeCompare(a.date));
@@ -938,14 +1056,19 @@ function getRecentLogsForExercise(exerciseId, excludeDate) {
     .sort((a, b) => a.setIndex - b.setIndex);
 }
 
-/** Highest weight ever logged (done=true) for an exercise. Returns null if none. */
-function getPRForExercise(exerciseId) {
+/**
+ * All-time best logged set (done=true) for an exercise.
+ * Rep-based exercises rank by heaviest weight; seconds-based exercises rank
+ * by longest duration (stored in the `reps` field). Returns null if none.
+ */
+function getPRForExercise(exerciseId, unit = 'reps') {
+  const rankField = unit === 'seconds' ? 'reps' : 'weight';
   const done = state.logs.filter(l =>
-    l.exerciseId === exerciseId && l.done && l.weight != null
+    l.exerciseId === exerciseId && l.done && l[rankField] != null
   );
   if (!done.length) return null;
   return done.reduce((best, l) =>
-    l.weight > (best?.weight ?? -Infinity) ? l : best, null
+    l[rankField] > (best?.[rankField] ?? -Infinity) ? l : best, null
   );
 }
 
@@ -999,6 +1122,37 @@ async function unremoveId(date, exerciseId) {
  * may be looked up from anywhere, e.g. the Progress tab history selector).
  * Never returns the raw internal id.
  */
+/**
+ * Resolves the full exercise definition for an id — recurring plan first
+ * (any day, archived included so history keeps its metadata), then
+ * session-scoped swap/add extras. Returns null when unknown.
+ */
+function getExerciseDef(exerciseId) {
+  if (state.plan) {
+    for (const day of state.plan.days) {
+      const ex = day.exercises?.find(e => e.id === exerciseId);
+      if (ex) return ex;
+    }
+  }
+  for (const key in state.meta) {
+    if (!key.startsWith('swaps_')) continue;
+    const extra = state.meta[key]?.value?.find(e => e.id === exerciseId);
+    if (extra) return extra;
+  }
+  return null;
+}
+
+/** 'reps' | 'seconds' for an exercise id; unknown ids default to 'reps'. */
+function getExerciseUnit(exerciseId) {
+  return getExerciseDef(exerciseId)?.unit ?? 'reps';
+}
+
+/** Formats a logged reps-field value per unit: 8 → '8' (reps) or '45s' (seconds). */
+function formatEffort(value, unit) {
+  if (value == null) return '?';
+  return unit === 'seconds' ? `${value}s` : String(value);
+}
+
 function getExerciseName(exerciseId) {
   if (state.plan) {
     for (const day of state.plan.days) {
@@ -1022,6 +1176,7 @@ function getExerciseName(exerciseId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function renderToday() {
+  stopDurationTimer(); // the timed row's DOM is about to be rebuilt
   const viewDate = state.ui.viewedDate || state.ui.today;
   const isFutureDate = viewDate > state.ui.today;
   const { dayPlan, activeEx, extras, allExercises } = resolveExercisesForDate(viewDate);
@@ -1040,8 +1195,7 @@ function renderToday() {
   }
 
   // Bodyweight prompt — always about today specifically, never the viewed date
-  const bwLogged = !!state.bodyweight.find(b => b.date === state.ui.today);
-  document.getElementById('bw-prompt-card').hidden = bwLogged;
+  updateBwPromptVisibility();
 
   const sessionOverview = document.getElementById('session-overview');
   const restDayCard     = document.getElementById('rest-day-card');
@@ -1109,13 +1263,16 @@ function renderToday() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
-  const prevLogs = getRecentLogsForExercise(ex.id, date);
-  const pr       = getPRForExercise(ex.id);
-  const complete = isExerciseComplete(ex.id, date, ex.sets);
-  const expanded = state.ui.expandedExerciseId === ex.id;
+  const unit      = ex.unit ?? 'reps';
+  const isSeconds = unit === 'seconds';
+  const prevLogs  = getRecentLogsForExercise(ex.id, date);
+  const pr        = getPRForExercise(ex.id, unit);
+  const complete  = isExerciseComplete(ex.id, date, ex.sets);
+  const expanded  = state.ui.expandedExerciseId === ex.id;
 
+  // Seconds-based PBs rank by longest hold; rep-based by heaviest weight
   const prBadge = pr
-    ? `<span class="ex-pr-badge">PR&nbsp;${pr.weight}kg</span>`
+    ? `<span class="ex-pr-badge">PR&nbsp;${isSeconds ? `${pr.reps}s` : `${pr.weight}kg`}</span>`
     : '';
 
   const originTag = ex.isAdded
@@ -1129,13 +1286,31 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
   const setsRows = Array.from({ length: ex.sets }, (_, i) => {
     const log   = getExistingLog(date, ex.id, i);
     const prev  = prevLogs.find(l => l.setIndex === i);
-    const prevTxt = prev
-      ? `${prev.weight ?? '?'}×${prev.reps ?? '?'}`
-      : '—';
+    // Duration exercises show '45s' (with '20×45s' if the hold was weighted);
+    // rep exercises keep the classic 'kg×reps' reference.
+    const prevTxt = !prev
+      ? '—'
+      : isSeconds
+        ? (prev.weight != null
+            ? `${prev.weight}×${formatEffort(prev.reps, unit)}`
+            : formatEffort(prev.reps, unit))
+        : `${prev.weight ?? '?'}×${prev.reps ?? '?'}`;
     const done = log?.done ?? false;
 
+    // Duration sets get a start/stop timer that fills the seconds input
+    const timerBtn = isSeconds ? `
+        <button class="set-timer"
+                aria-label="Start timer for set ${i + 1}"
+                aria-pressed="false"
+                data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
+                ${disabledAttr}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <polygon points="6 4 20 12 6 20"/>
+          </svg>
+        </button>` : '';
+
     return `
-      <div class="set-row${done ? ' set-logged' : ''}"
+      <div class="set-row${isSeconds ? ' set-row-seconds' : ''}${done ? ' set-logged' : ''}"
            data-ex-id="${escHtml(ex.id)}" data-set-index="${i}">
         <span class="set-num">${i + 1}</span>
         <span class="set-prev">${escHtml(prevTxt)}</span>
@@ -1150,9 +1325,10 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
                type="number" inputmode="numeric" min="1"
                placeholder="${escHtml(String(ex.reps))}"
                value="${log?.reps ?? ''}"
-               aria-label="Reps, set ${i + 1}"
+               aria-label="${isSeconds ? 'Seconds' : 'Reps'}, set ${i + 1}"
                data-field="reps" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
                ${disabledAttr} />
+        ${timerBtn}
         <button class="set-check"
                 aria-label="Mark set ${i + 1} done"
                 aria-pressed="${done}"
@@ -1205,7 +1381,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
           </svg>
         </span>
         <span class="exercise-name">${escHtml(ex.name)}</span>
-        <span class="exercise-summary">${ex.sets}×${escHtml(String(ex.reps))}</span>
+        <span class="exercise-summary">${ex.sets}×${escHtml(formatEffort(ex.reps, unit))}</span>
         ${originTag}
         ${prBadge}
         <svg class="chevron-icon" width="16" height="16" viewBox="0 0 24 24"
@@ -1217,8 +1393,9 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
       <div class="exercise-body${expanded ? ' expanded' : ''}">
         ${metaBlock}
         <div class="sets-table">
-          <div class="sets-table-header">
-            <span>Set</span><span>Previous</span><span>kg</span><span>Reps</span><span></span>
+          <div class="sets-table-header${isSeconds ? ' sets-header-seconds' : ''}">
+            <span>Set</span><span>Previous</span><span>kg</span>
+            <span>${isSeconds ? 'Sec' : 'Reps'}</span>${isSeconds ? '<span></span>' : ''}<span></span>
           </div>
           ${setsRows}
         </div>
@@ -1303,6 +1480,11 @@ function wireExerciseCards(exercises, date) {
         date
       )
     );
+  });
+
+  // Stopwatch buttons on seconds-based sets
+  stack.querySelectorAll('.set-timer').forEach(btn => {
+    btn.addEventListener('click', () => handleDurationTimerClick(btn, date));
   });
 
   // Weight / reps inputs — persist on blur so re-renders don't lose values
@@ -1432,8 +1614,37 @@ async function handleSetCheck(exerciseId, setIndex, date) {
   const finishRow = document.getElementById('finish-session-row');
   if (finishRow) finishRow.hidden = finished || doneLogsToday.length === 0;
 
+  // Logging today's (and the week's) first set can trigger the weekly
+  // bodyweight prompt
+  updateBwPromptVisibility();
+
   // Week strip may transition from 'today' → 'inprogress'
   renderWeekStrip();
+}
+
+/**
+ * Weekly bodyweight rule (Mon–Sun ISO weeks): the prompt appears on the day
+ * the user logs their week's first completed session — whatever weekday that
+ * is — and disappears for the rest of the week once a weight is saved.
+ * Untrained days never prompt, so a week without sessions gets no prompt.
+ */
+function bodyweightLoggedThisWeek() {
+  const currentWeek = isoWeekStr(parseDate(state.ui.today));
+  // Older entries predate the stored `week` field — derive it from the date
+  return state.bodyweight.some(b =>
+    (b.week ?? isoWeekStr(parseDate(b.date))) === currentWeek
+  );
+}
+
+function shouldShowBwPrompt() {
+  if (bodyweightLoggedThisWeek()) return false;
+  // Only on a day actually trained — the week's first logged session
+  return state.logs.some(l => l.date === state.ui.today && l.done);
+}
+
+function updateBwPromptVisibility() {
+  const card = document.getElementById('bw-prompt-card');
+  if (card) card.hidden = !shouldShowBwPrompt();
 }
 
 async function handleBwSave() {
@@ -1444,7 +1655,7 @@ async function handleBwSave() {
     return;
   }
   const today = state.ui.today;
-  const entry = { date: today, kg };
+  const entry = { date: today, kg, week: isoWeekStr(parseDate(today)) };
   await put('bodyweight', entry);
 
   const idx = state.bodyweight.findIndex(b => b.date === today);
@@ -1469,56 +1680,14 @@ async function handleFinishSession(date) {
   await put('meta', finishedDoc);
   state.meta[FINISHED_KEY] = finishedDoc;
 
-  await recalculateStreak();
-
   stopRestTimer();
   document.getElementById('finish-session-row').hidden = true;
   renderWeekStrip();
-  renderHeader();
   showToast(
     date === state.ui.today
       ? 'Session complete! Great work.'
       : `${friendlyDateLabel(date)} marked complete.`
   );
-}
-
-async function recalculateStreak() {
-  const finishedMap   = state.meta[FINISHED_KEY]?.value ?? {};
-  const finishedDates = Object.keys(finishedMap).filter(d => finishedMap[d]);
-
-  // Map ISO week → count of finished sessions in that week
-  const weekCounts = {};
-  for (const dateStr of finishedDates) {
-    const wk = isoWeekStr(parseDate(dateStr));
-    weekCounts[wk] = (weekCounts[wk] ?? 0) + 1;
-  }
-
-  const today       = new Date();
-  const currentWeek = isoWeekStr(today);
-
-  // Current week contributes if already at threshold
-  let streak = (weekCounts[currentWeek] ?? 0) >= MIN_SESSIONS_PER_WEEK ? 1 : 0;
-
-  // Walk backwards week by week until a week below threshold is found
-  const probe = getMondayOf(today);
-  probe.setDate(probe.getDate() - 7); // start from the previous Monday
-
-  for (let guard = 0; guard < 520; guard++) {
-    const wk    = isoWeekStr(probe);
-    const count = weekCounts[wk] ?? 0;
-    if (count < MIN_SESSIONS_PER_WEEK) break; // streak broken
-    streak++;
-    probe.setDate(probe.getDate() - 7);
-  }
-
-  const updated = {
-    key:               STREAK_KEY,
-    count:             streak,
-    lastCompletedWeek: currentWeek,
-    weekHistory:       weekCounts,
-  };
-  await put('meta', updated);
-  state.meta[STREAK_KEY] = updated;
 }
 
 function promptMidWorkoutSwap(originalId, originalName, date) {
@@ -1535,6 +1704,7 @@ function promptMidWorkoutSwap(originalId, originalName, date) {
         name,
         sets:       origEx?.sets ?? 3,
         reps:       origEx?.reps ?? '8',
+        unit:       origEx?.unit ?? 'reps',
         muscles:    '',
         cue:        '',
         isSwap:     true,
@@ -1558,28 +1728,85 @@ function promptMidWorkoutSwap(originalId, originalName, date) {
   );
 }
 
-/** Adds a one-off, session-scoped exercise to a date's session (not the recurring plan). */
+/**
+ * Every exercise definition ever created — recurring plan (archived
+ * included, so long-gone exercises still autocomplete) plus all session-
+ * scoped swap/add extras across every date. Deduplicated by name
+ * (case-insensitive): the first definition seen per name wins, so an
+ * exercise logged many times appears exactly once. Sorted A→Z.
+ */
+function buildKnownExerciseList() {
+  const seen = new Map(); // lowercased name → definition
+  const consider = ex => {
+    const key = ex.name?.trim().toLowerCase();
+    if (!key || key === UNNAMED_EXERCISE_PLACEHOLDER.toLowerCase()) return;
+    if (!seen.has(key)) seen.set(key, ex);
+  };
+  for (const day of state.plan?.days ?? []) {
+    for (const ex of day.exercises ?? []) consider(ex);
+  }
+  for (const key in state.meta) {
+    if (!key.startsWith('swaps_')) continue;
+    for (const ex of state.meta[key]?.value ?? []) consider(ex);
+  }
+  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Adds a session-scoped exercise to a date's session (not the recurring
+ * plan). Typing filters all previously known exercises; picking one
+ * reattaches the existing definition — same id, so its unit, history, and
+ * PB data carry over. Unmatched names create a genuinely new exercise.
+ */
 function handleAddExercise(date) {
+  const known = buildKnownExerciseList();
+  let selected = null; // known definition picked from the list, or null = create new
+
   showFormDialog(
-    'Add a one-off exercise to this session.',
+    'Add an exercise to this session.',
     [
-      { name: 'name', label: 'Exercise name', placeholder: 'e.g. Cable Fly' },
+      { name: 'name', label: 'Exercise name', placeholder: 'Type to search…' },
       { name: 'sets', label: 'Sets', type: 'number', inputmode: 'numeric', value: '3' },
       { name: 'reps', label: 'Reps target', value: '8' },
     ],
     async ({ name, sets, reps }) => {
       if (!name) return;
 
-      const newEx = {
-        id:         generateId('added'),
-        name,
-        sets:       parseInt(sets, 10) || 3,
-        reps:       reps || '8',
-        muscles:    '',
-        cue:        '',
-        isAdded:    true,
-        originalId: null,
-      };
+      // Typed text that exactly matches a known exercise attaches it even
+      // without an explicit tap — never create a duplicate record by name
+      const match = selected?.name.toLowerCase() === name.toLowerCase()
+        ? selected
+        : known.find(k => k.name.toLowerCase() === name.toLowerCase()) ?? null;
+
+      const { allExercises } = resolveExercisesForDate(date);
+      if (match && allExercises.some(e => e.id === match.id)) {
+        showToast(`"${match.name}" is already in this session.`);
+        return;
+      }
+
+      const newEx = match
+        ? {
+            id:         match.id, // reuse — history and PBs stay attached
+            name:       match.name,
+            sets:       parseInt(sets, 10) || match.sets || 3,
+            reps:       reps || match.reps || '8',
+            unit:       match.unit ?? 'reps',
+            muscles:    match.muscles ?? '',
+            cue:        match.cue ?? '',
+            isAdded:    true,
+            originalId: null,
+          }
+        : {
+            id:         generateId('added'),
+            name,
+            sets:       parseInt(sets, 10) || 3,
+            reps:       reps || '8',
+            unit:       'reps',
+            muscles:    '',
+            cue:        '',
+            isAdded:    true,
+            originalId: null,
+          };
 
       const swapsKey = `swaps_${date}`;
       const bucket   = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
@@ -1589,10 +1816,64 @@ function handleAddExercise(date) {
 
       renderToday();
       renderWeekStrip();
-      showToast(`Added "${newEx.name}".`);
+      showToast(match ? `Added "${newEx.name}" (existing exercise).` : `Added "${newEx.name}".`);
     },
     'Add'
   );
+
+  // Autocomplete: filtered suggestion list under the name input
+  const wrap      = document.getElementById('dialog-inputs');
+  const nameInput = wrap.querySelector('[data-field="name"]');
+  const setsInput = wrap.querySelector('[data-field="sets"]');
+  const repsInput = wrap.querySelector('[data-field="reps"]');
+
+  const listEl = document.createElement('div');
+  listEl.className = 'autocomplete-list';
+  listEl.hidden = true;
+  nameInput.closest('.dialog-field').appendChild(listEl);
+
+  const renderSuggestions = () => {
+    const q = nameInput.value.trim().toLowerCase();
+    if (!q) { listEl.hidden = true; listEl.innerHTML = ''; return; }
+
+    const matches   = known.filter(k => k.name.toLowerCase().includes(q)).slice(0, 8);
+    const exactHit  = known.some(k => k.name.toLowerCase() === q);
+
+    listEl.innerHTML = matches.map(m => `
+      <button type="button" class="autocomplete-item" data-name="${escHtml(m.name)}">
+        <span class="autocomplete-item-name">${escHtml(m.name)}</span>
+        <span class="autocomplete-item-meta">${m.sets}×${escHtml(formatEffort(m.reps, m.unit ?? 'reps'))}</span>
+      </button>`).join('') +
+      (exactHit ? '' : `
+      <button type="button" class="autocomplete-item autocomplete-item-new" data-new="1">
+        + Add new exercise "${escHtml(nameInput.value.trim())}"
+      </button>`);
+    listEl.hidden = false;
+
+    listEl.querySelectorAll('.autocomplete-item').forEach(item => {
+      item.addEventListener('click', () => {
+        if (item.dataset.new) {
+          selected = null; // explicit new exercise with the typed name
+        } else {
+          selected = known.find(k => k.name === item.dataset.name) ?? null;
+          if (selected) {
+            nameInput.value = selected.name;
+            setsInput.value = String(selected.sets ?? 3);
+            repsInput.value = String(selected.reps ?? '8');
+            repsInput.closest('.dialog-field').querySelector('.dialog-input-label')
+              .textContent = (selected.unit === 'seconds') ? 'Seconds target' : 'Reps target';
+          }
+        }
+        listEl.hidden = true;
+        listEl.innerHTML = '';
+      });
+    });
+  };
+
+  nameInput.addEventListener('input', () => {
+    selected = null; // edits invalidate a previous pick
+    renderSuggestions();
+  });
 }
 
 /**
@@ -1823,22 +2104,33 @@ function renderExerciseHistory(exerciseId) {
     return;
   }
 
-  const prEntry = getPRForExercise(exerciseId);
+  const unit      = getExerciseUnit(exerciseId);
+  const isSeconds = unit === 'seconds';
+  const prEntry   = getPRForExercise(exerciseId, unit);
 
   list.innerHTML = dates.map(dateStr => {
     const entries  = byDate[dateStr];
-    const maxWt    = Math.max(...entries.map(l => l.weight ?? 0));
     const totalSets = entries.length;
-    const avgReps  = totalSets
-      ? Math.round(entries.reduce((s, l) => s + (l.reps ?? 0), 0) / totalSets)
-      : 0;
-    const isPR  = prEntry && maxWt === prEntry.weight && dateStr === prEntry.date;
+    // Seconds-based sessions summarise as longest hold; rep-based as top weight × avg reps
+    let valueTxt, isPR;
+    if (isSeconds) {
+      const maxDur = Math.max(...entries.map(l => l.reps ?? 0));
+      valueTxt = `best ${maxDur}s · ${totalSets} sets`;
+      isPR     = prEntry && maxDur === prEntry.reps && dateStr === prEntry.date;
+    } else {
+      const maxWt   = Math.max(...entries.map(l => l.weight ?? 0));
+      const avgReps = totalSets
+        ? Math.round(entries.reduce((s, l) => s + (l.reps ?? 0), 0) / totalSets)
+        : 0;
+      valueTxt = `${maxWt}kg × ${avgReps} · ${totalSets} sets`;
+      isPR     = prEntry && maxWt === prEntry.weight && dateStr === prEntry.date;
+    }
     const prTag = isPR ? '<span class="history-row-pr">PR</span>' : '';
 
     return `
       <div class="history-row">
         <span class="history-row-date">${friendlyDateLabel(dateStr)}</span>
-        <span class="history-row-value">${maxWt}kg × ${avgReps} · ${totalSets} sets</span>
+        <span class="history-row-value">${valueTxt}</span>
         ${prTag}
       </div>`;
   }).join('');
@@ -1857,30 +2149,42 @@ function renderPlan() {
   state.ui.planDirty = false; // DOM was just rebuilt from saved state
 }
 
-function buildPlanDayCardHTML(day) {
-  const activeEx = (day.exercises ?? []).filter(e => !e.archived);
-
-  const exRows = activeEx.map(ex => `
+/**
+ * One editable exercise row in the plan editor. `ex` may be a plan exercise
+ * or a fresh blank stub for newly added rows. The unit toggle cycles
+ * reps ↔ sec and is read back from data-unit on save.
+ */
+function buildPlanExerciseRowHTML(dayIdx, ex) {
+  const unit      = ex.unit ?? 'reps';
+  const isSeconds = unit === 'seconds';
+  return `
     <div class="plan-exercise-row"
-         data-day="${day.dayIndex}" data-ex-id="${escHtml(ex.id)}">
+         data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}">
       <input class="plan-ex-name" type="text"
              placeholder="Exercise name"
              value="${escHtml(ex.name)}"
              aria-label="Exercise name"
-             data-day="${day.dayIndex}" data-ex-id="${escHtml(ex.id)}" />
+             data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
       <input class="plan-ex-sets" type="number" min="1" max="20"
              placeholder="Sets"
              value="${ex.sets}"
              aria-label="Sets"
-             data-day="${day.dayIndex}" data-ex-id="${escHtml(ex.id)}" />
+             data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
       <input class="plan-ex-reps" type="text"
-             placeholder="Reps"
+             placeholder="${isSeconds ? 'Sec' : 'Reps'}"
              value="${escHtml(String(ex.reps))}"
-             aria-label="Reps target"
-             data-day="${day.dayIndex}" data-ex-id="${escHtml(ex.id)}" />
+             aria-label="${isSeconds ? 'Seconds target' : 'Reps target'}"
+             data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
+      <button class="plan-ex-unit${isSeconds ? ' plan-ex-unit-seconds' : ''}"
+              type="button"
+              data-unit="${unit}"
+              aria-label="Unit: ${isSeconds ? 'seconds' : 'reps'}. Tap to switch."
+              data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}">
+        ${isSeconds ? 'sec' : 'reps'}
+      </button>
       <button class="plan-ex-remove"
-              aria-label="Remove ${escHtml(ex.name)}"
-              data-day="${day.dayIndex}" data-ex-id="${escHtml(ex.id)}">
+              aria-label="Remove ${escHtml(ex.name || 'exercise')}"
+              data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2.5"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1888,7 +2192,26 @@ function buildPlanDayCardHTML(day) {
           <line x1="6"  y1="6"  x2="18" y2="18"/>
         </svg>
       </button>
-    </div>`).join('');
+    </div>`;
+}
+
+function buildPlanDayCardHTML(day) {
+  const activeEx = (day.exercises ?? []).filter(e => !e.archived);
+  const exRows   = activeEx
+    .map(ex => buildPlanExerciseRowHTML(day.dayIndex, ex))
+    .join('');
+
+  // Day-level bulk actions only make sense when the day has a program
+  const hasProgram = activeEx.length > 0 || (day.sessionName ?? '') !== '';
+  const dayActions = hasProgram ? `
+      <div class="plan-day-actions">
+        <button class="btn-ghost plan-move-day-btn" data-day="${day.dayIndex}">
+          ⇢ Move day…
+        </button>
+        <button class="btn-ghost plan-delete-day-btn" data-day="${day.dayIndex}">
+          ✕ Delete day
+        </button>
+      </div>` : '';
 
   return `
     <div class="card plan-day-card" data-day="${day.dayIndex}">
@@ -1906,6 +2229,7 @@ function buildPlanDayCardHTML(day) {
       <button class="btn-ghost plan-add-ex-btn" data-day="${day.dayIndex}">
         + Add exercise
       </button>
+      ${dayActions}
     </div>`;
 }
 
@@ -1926,39 +2250,27 @@ function wirePlanInteractions() {
       const list   = container.querySelector(
         `.plan-exercises-list[data-day="${dayIdx}"]`
       );
-      const newId  = generateId('ex');
-      const row    = document.createElement('div');
-      row.className          = 'plan-exercise-row';
-      row.dataset.day        = String(dayIdx);
-      row.dataset.exId       = newId;
-      row.innerHTML = `
-        <input class="plan-ex-name" type="text" placeholder="Exercise name"
-               value="" aria-label="Exercise name"
-               data-day="${dayIdx}" data-ex-id="${newId}" />
-        <input class="plan-ex-sets" type="number" min="1" max="20"
-               placeholder="Sets" value="3" aria-label="Sets"
-               data-day="${dayIdx}" data-ex-id="${newId}" />
-        <input class="plan-ex-reps" type="text"
-               placeholder="Reps" value="8" aria-label="Reps target"
-               data-day="${dayIdx}" data-ex-id="${newId}" />
-        <button class="plan-ex-remove" aria-label="Remove exercise"
-                data-day="${dayIdx}" data-ex-id="${newId}">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.5"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <line x1="18" y1="6"  x2="6"  y2="18"/>
-            <line x1="6"  y1="6"  x2="18" y2="18"/>
-          </svg>
-        </button>`;
-      list.appendChild(row);
+      const stub = { id: generateId('ex'), name: '', sets: 3, reps: '8', unit: 'reps' };
+      list.insertAdjacentHTML('beforeend', buildPlanExerciseRowHTML(dayIdx, stub));
+      const row = list.lastElementChild;
       wireRemoveButton(row.querySelector('.plan-ex-remove'));
+      wireUnitToggle(row.querySelector('.plan-ex-unit'));
       state.ui.planDirty = true;
       row.querySelector('.plan-ex-name').focus();
     });
   });
 
-  // Remove buttons on pre-existing rows
+  // Remove buttons and unit toggles on pre-existing rows
   container.querySelectorAll('.plan-ex-remove').forEach(btn => wireRemoveButton(btn));
+  container.querySelectorAll('.plan-ex-unit').forEach(btn => wireUnitToggle(btn));
+
+  // Day-level bulk actions
+  container.querySelectorAll('.plan-delete-day-btn').forEach(btn => {
+    btn.addEventListener('click', () => handleDeleteDay(parseInt(btn.dataset.day, 10)));
+  });
+  container.querySelectorAll('.plan-move-day-btn').forEach(btn => {
+    btn.addEventListener('click', () => handleMoveDay(parseInt(btn.dataset.day, 10)));
+  });
 }
 
 function wireRemoveButton(btn) {
@@ -1966,6 +2278,109 @@ function wireRemoveButton(btn) {
     btn.closest('.plan-exercise-row')?.remove();
     state.ui.planDirty = true;
   });
+}
+
+/** Cycles a plan row's unit button reps ↔ sec; read back via data-unit on save. */
+function wireUnitToggle(btn) {
+  btn.addEventListener('click', () => {
+    const toSeconds = btn.dataset.unit !== 'seconds';
+    btn.dataset.unit = toSeconds ? 'seconds' : 'reps';
+    btn.textContent  = toSeconds ? 'sec' : 'reps';
+    btn.classList.toggle('plan-ex-unit-seconds', toSeconds);
+    btn.setAttribute('aria-label', `Unit: ${toSeconds ? 'seconds' : 'reps'}. Tap to switch.`);
+    const repsInput = btn.closest('.plan-exercise-row')?.querySelector('.plan-ex-reps');
+    if (repsInput) {
+      repsInput.placeholder = toSeconds ? 'Sec' : 'Reps';
+      repsInput.setAttribute('aria-label', toSeconds ? 'Seconds target' : 'Reps target');
+    }
+    state.ui.planDirty = true;
+  });
+}
+
+/**
+ * Deletes a full training day's program: every active exercise is soft-
+ * archived (so historical logs keep resolving names/PBs) and the day
+ * becomes a rest day. Historical logged sets are never touched.
+ */
+function handleDeleteDay(dayIdx) {
+  const dayName = DAY_NAMES_LONG[dayIdx];
+  const note = state.ui.planDirty ? ' Unsaved plan edits will be discarded.' : '';
+  showDialog(
+    `Delete ${dayName}'s entire program? The day becomes a rest day. Logged history is kept.${note}`,
+    async () => {
+      const days = state.plan.days.map(day => {
+        if (day.dayIndex !== dayIdx) return day;
+        return {
+          ...day,
+          sessionName: '',
+          isRest: true,
+          exercises: (day.exercises ?? []).map(e => ({ ...e, archived: true })),
+        };
+      });
+      const updated = { ...state.plan, days };
+      await put('plan', updated);
+      state.plan = updated;
+      state.ui.planDirty = false;
+      renderPlan();
+      renderWeekStrip();
+      showToast(`${dayName}'s program deleted.`);
+    }
+  );
+}
+
+/**
+ * Moves a full day's program to another day (cut & paste): the target day's
+ * current program is overwritten — its exercises are soft-archived so
+ * historical logs stay resolvable — and the source day becomes empty.
+ */
+function handleMoveDay(sourceIdx) {
+  const sourceName = DAY_NAMES_LONG[sourceIdx];
+  const options = state.plan.days
+    .filter(d => d.dayIndex !== sourceIdx)
+    .map(d => ({
+      value: String(d.dayIndex),
+      label: DAY_NAMES_LONG[d.dayIndex] +
+        (d.isRest ? ' (rest)' : d.sessionName ? ` (${d.sessionName})` : ''),
+    }));
+  const note = state.ui.planDirty ? ' Unsaved plan edits will be discarded.' : '';
+
+  showFormDialog(
+    `Move ${sourceName}'s program to another day? The target day's current program is overwritten and cannot be recovered, and ${sourceName} becomes empty.${note}`,
+    [{ name: 'target', label: 'Move to', options }],
+    async ({ target }) => {
+      const targetIdx = parseInt(target, 10);
+      if (isNaN(targetIdx) || targetIdx === sourceIdx) return;
+
+      const days = state.plan.days.map(day => {
+        if (day.dayIndex === sourceIdx) {
+          // Source is cleared — its exercises (incl. archived) travel with the move
+          return { ...day, sessionName: '', isRest: true, exercises: [] };
+        }
+        if (day.dayIndex === targetIdx) {
+          const src = state.plan.days[sourceIdx];
+          // Target's previous program is discarded from the schedule but
+          // soft-archived so its logged history keeps resolving
+          const displaced = (day.exercises ?? []).map(e => ({ ...e, archived: true }));
+          return {
+            ...day,
+            sessionName: src.sessionName,
+            isRest: src.isRest,
+            exercises: [...(src.exercises ?? []), ...displaced],
+          };
+        }
+        return day;
+      });
+
+      const updated = { ...state.plan, days };
+      await put('plan', updated);
+      state.plan = updated;
+      state.ui.planDirty = false;
+      renderPlan();
+      renderWeekStrip();
+      showToast(`Moved ${sourceName}'s program to ${DAY_NAMES_LONG[targetIdx]}.`);
+    },
+    'Move'
+  );
 }
 
 async function handleSavePlan() {
@@ -1990,6 +2405,8 @@ async function handleSavePlan() {
 
       const sets   = parseInt(row.querySelector('.plan-ex-sets')?.value, 10) || 3;
       const reps   = row.querySelector('.plan-ex-reps')?.value.trim() || '8';
+      const unit   = row.querySelector('.plan-ex-unit')?.dataset.unit === 'seconds'
+        ? 'seconds' : 'reps';
       const origin = day.exercises?.find(e => e.id === exId);
 
       updatedExercises.push({
@@ -1997,6 +2414,7 @@ async function handleSavePlan() {
         name,
         sets,
         reps,
+        unit,
         muscles:  origin?.muscles  ?? '',
         cue:      origin?.cue      ?? '',
         archived: false,
@@ -2102,7 +2520,8 @@ async function handleImport(event) {
         ]);
 
         await loadState();
-        await recalculateStreak();
+        await dropRetiredMeta();
+        await migrateExerciseUnits();
         state.ui.viewedDate = state.ui.today;
         render();
         showToast('Data imported successfully.');

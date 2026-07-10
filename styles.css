@@ -142,46 +142,6 @@ a { color: var(--color-accent); text-decoration: none; }
   color: var(--color-secondary);
 }
 
-.streak-badge {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  background-color: var(--color-accent-dim);
-  border: 1px solid var(--color-accent-glow);
-  border-radius: var(--radius-xl);
-  padding: 6px 12px;
-  color: var(--color-accent);
-  min-height: 36px;
-}
-
-.streak-badge svg {
-  flex-shrink: 0;
-}
-
-.streak-count {
-  font-size: 17px;
-  font-weight: 800;
-  letter-spacing: -0.5px;
-}
-
-.streak-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-accent);
-  opacity: 0.8;
-}
-
-/* Zero streak — muted */
-.streak-badge.streak-zero {
-  background-color: transparent;
-  border-color: var(--color-border);
-  color: var(--color-secondary);
-}
-.streak-badge.streak-zero .streak-count,
-.streak-badge.streak-zero .streak-label {
-  color: var(--color-secondary);
-}
-
 /* ═══════════════════════════════════════════════════════
    WEEK STRIP
 ═══════════════════════════════════════════════════════ */
@@ -684,6 +644,34 @@ a { color: var(--color-accent); text-decoration: none; }
   color: var(--color-success);
 }
 
+/* Seconds-based sets — extra stopwatch column: set · prev · kg · sec · timer · check */
+.set-row.set-row-seconds,
+.sets-table-header.sets-header-seconds {
+  grid-template-columns: 28px 1fr 60px 60px 36px 44px;
+}
+
+.set-timer {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-muted);
+  background-color: var(--color-surface-2);
+  color: var(--color-secondary);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.set-timer:active {
+  transform: scale(0.92);
+}
+
+.set-timer.set-timer-running {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 /* Notes row */
 .exercise-notes-row {
   padding: 6px 16px 12px;
@@ -929,9 +917,28 @@ a { color: var(--color-accent); text-decoration: none; }
 
 .plan-exercise-row {
   display: grid;
-  grid-template-columns: 1fr 48px 60px 36px;
+  grid-template-columns: 1fr 44px 52px 44px 36px;
   gap: 6px;
   align-items: center;
+}
+
+/* Unit toggle — reps ↔ sec */
+.plan-ex-unit {
+  height: 34px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface-2);
+  color: var(--color-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.plan-ex-unit.plan-ex-unit-seconds {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .plan-ex-name,
@@ -994,6 +1001,69 @@ a { color: var(--color-accent); text-decoration: none; }
 
 .plan-add-ex-btn:active {
   opacity: 0.6;
+}
+
+/* Day-level bulk actions — move / delete an entire day's program */
+.plan-day-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border-muted);
+}
+
+.plan-day-actions .btn-ghost {
+  font-size: 12px;
+  padding: 6px 4px;
+}
+
+.plan-delete-day-btn {
+  color: var(--color-danger);
+}
+
+/* ═══════════════════════════════════════════════════════
+   AUTOCOMPLETE (add-exercise dialog)
+═══════════════════════════════════════════════════════ */
+.autocomplete-list {
+  margin-top: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-2);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.autocomplete-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--color-text);
+  text-align: left;
+  border-bottom: 1px solid var(--color-border-muted);
+}
+
+.autocomplete-item:last-child {
+  border-bottom: none;
+}
+
+.autocomplete-item:active {
+  background-color: var(--color-surface);
+}
+
+.autocomplete-item-meta {
+  font-size: 11px;
+  color: var(--color-secondary);
+  flex-shrink: 0;
+}
+
+.autocomplete-item-new {
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 /* ═══════════════════════════════════════════════════════
