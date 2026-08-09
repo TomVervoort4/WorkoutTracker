@@ -11,9 +11,11 @@
   <title>FitTrack</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <!-- Inter is self-hosted from ./Inter (see @font-face in styles.css), so the
+       app makes no external requests at all. Preloaded because the @font-face
+       sits inside the stylesheet, which would otherwise delay discovery until
+       the CSS has parsed. -->
+  <link rel="preload" href="./Inter/Inter-VariableFont_opsz,wght.ttf" as="font" type="font/ttf" crossorigin />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -49,27 +51,6 @@
       <div class="viewing-date-banner" id="viewing-date-banner" hidden>
         <span class="viewing-date-text" id="viewing-date-text">Viewing June 29</span>
         <button class="btn-ghost back-to-today-btn" id="back-to-today-btn">Back to Today</button>
-      </div>
-
-      <!-- Bodyweight prompt card (shown on first visit each day) -->
-      <div class="card bw-prompt-card" id="bw-prompt-card" hidden>
-        <div class="bw-prompt-inner">
-          <span class="bw-prompt-label">Log today's bodyweight</span>
-          <div class="bw-input-row">
-            <input
-              class="bw-input"
-              id="bw-input"
-              type="number"
-              inputmode="decimal"
-              step="0.1"
-              min="20"
-              max="300"
-              placeholder="kg"
-              aria-label="Bodyweight in kilograms"
-            />
-            <button class="btn-primary bw-save-btn" id="bw-save-btn" aria-label="Save bodyweight">Save</button>
-          </div>
-        </div>
       </div>
 
       <!-- Session overview bar -->
@@ -170,14 +151,6 @@
     <section class="tab-view" id="view-progress" role="tabpanel" aria-label="Progress" hidden>
 
       <div class="section-header">
-        <h2 class="section-title">Bodyweight</h2>
-      </div>
-      <div class="card chart-card" id="bw-chart-card">
-        <canvas id="bw-chart" aria-label="Bodyweight trend chart" role="img"></canvas>
-        <p class="chart-empty" id="bw-chart-empty">No bodyweight data yet. Log your weight on the Today tab.</p>
-      </div>
-
-      <div class="section-header">
         <h2 class="section-title">Volume per Week</h2>
       </div>
       <div class="card chart-card" id="volume-chart-card">
@@ -196,6 +169,31 @@
           <!-- JS renders history rows here -->
         </div>
       </div>
+
+    </section>
+
+    <!-- ── BODY TAB ── -->
+    <section class="tab-view" id="view-body" role="tabpanel" aria-label="Body composition" hidden>
+
+      <div class="section-header bc-header">
+        <h2 class="section-title">Body</h2>
+        <button class="btn-secondary bc-import-btn" id="bc-import-btn" type="button">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          Import Fitdays data
+        </button>
+        <!-- Fitdays names its export .csv but writes a legacy .xls; .xlsx is
+             accepted too so a re-saved file still reaches the parser, which
+             reports what it actually found. -->
+        <input type="file" id="bc-import-input" accept=".csv,.xls,.xlsx" style="display:none" aria-label="Choose a Fitdays export file" />
+      </div>
+
+      <p class="bc-error" id="bc-error" role="alert" hidden></p>
+
+      <div id="bc-content"><!-- JS renders the body-composition view here --></div>
 
     </section>
 
@@ -308,6 +306,11 @@
         <button class="btn-danger" id="clear-data-btn">Clear All Data</button>
       </div>
 
+      <div class="storage-status-row" id="storage-status-row">
+        <span class="storage-status-dot" id="storage-status-dot" aria-hidden="true"></span>
+        <span class="storage-status-text" id="storage-status-text">Checking storage…</span>
+      </div>
+
       <div class="app-version-row">
         <span>FitTrack</span>
         <span id="app-version">v1.0.0</span>
@@ -338,6 +341,15 @@
         <line x1="6" y1="20" x2="6" y2="14"/>
       </svg>
       <span>Progress</span>
+    </button>
+    <button class="nav-tab" data-view="body" aria-label="Body composition" aria-selected="false" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="4.5" r="2.2"/>
+        <path d="M5 9h14"/>
+        <path d="M9.5 9v4l-1.5 8"/>
+        <path d="M14.5 9v4l1.5 8"/>
+      </svg>
+      <span>Body</span>
     </button>
     <button class="nav-tab" data-view="plan" aria-label="Workout plan" aria-selected="false" role="tab">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -412,6 +424,16 @@
       });
     }
   </script>
+
+  <!--
+    SheetJS — vendored as a local static file, never loaded from a CDN, so the
+    app stays fully offline. Fitdays exports a legacy .xls binary behind a .csv
+    extension; this is what reads it. Classic script on purpose: it defines the
+    global XLSX that bodycomp.js reads, and being non-deferred it is parsed
+    before the modules run.
+    Source: https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js
+  -->
+  <script src="./vendor/xlsx.full.min.js"></script>
 
   <script type="module" src="./db.js"></script>
   <script type="module" src="./app.js"></script>

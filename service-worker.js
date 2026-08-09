@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v6";
 const CACHE_NAME = `fittrack-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -7,6 +7,12 @@ const APP_SHELL = [
   "./app.js",
   "./db.js",
   "./insights.js",
+  "./bodycomp.js",
+  // Vendored SheetJS — precached so Fitdays imports work with no network
+  "./vendor/xlsx.full.min.js",
+  // Self-hosted Inter — precached so the UI renders in its real typeface
+  // offline instead of falling back to the system sans
+  "./Inter/Inter-VariableFont_opsz,wght.ttf",
   "./manifest.webmanifest",
   "./icons/icon-192.png",
   "./icons/icon-512.png"

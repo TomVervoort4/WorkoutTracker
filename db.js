@@ -1,5 +1,5 @@
 const DB_NAME = "FitTrackDB";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let _db = null;
 
@@ -32,6 +32,19 @@ function openDB() {
       // 4. meta – streak metadata, app settings, and state snapshots; keyed by string key
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta", { keyPath: "key" });
+      }
+
+      // 5. bodyComposition – raw Fitdays scale readings, one record per
+      //    measurement. Keyed on `datetime` ("YYYY-MM-DDTHH:MM"), which is what
+      //    makes re-importing an overlapping export range idempotent.
+      //    Stored verbatim and never collapsed or averaged: the daily series the
+      //    body tab draws is derived at render time, and the external analysis
+      //    layer needs the untouched readings.
+      if (!db.objectStoreNames.contains("bodyComposition")) {
+        const bcStore = db.createObjectStore("bodyComposition", {
+          keyPath: "datetime",
+        });
+        bcStore.createIndex("by_date", "date", { unique: false });
       }
     };
 
@@ -137,6 +150,45 @@ async function getAll(store) {
 }
 
 /**
+ * Retrieve every key in a store, without reading the records themselves.
+ * @param {string} store - Object store name
+ * @returns {Promise<IDBValidKey[]>} Array of all keys
+ */
+async function getAllKeys(store) {
+  try {
+    return await runTransaction(store, "readonly", (s) => s.getAllKeys());
+  } catch (err) {
+    console.error(`[FitTrackDB] getAllKeys(${store}) failed:`, err);
+    return [];
+  }
+}
+
+/**
+ * Insert or update many records in a single transaction — either every record
+ * lands or none do. Used by the Fitdays import so a failure part-way through
+ * can't leave a half-imported reading set behind.
+ * @param {string} store - Object store name
+ * @param {object[]} values - Records to store (each must include keyPath field)
+ * @returns {Promise<number>} How many records were written
+ */
+async function putMany(store, values) {
+  if (!values.length) return 0;
+
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, "readwrite");
+    const s = tx.objectStore(store);
+    for (const value of values) s.put(value);
+
+    tx.oncomplete = () => resolve(values.length);
+    tx.onerror = (event) => {
+      console.error(`[FitTrackDB] putMany(${store}) failed:`, event.target.error);
+      reject(event.target.error);
+    };
+  });
+}
+
+/**
  * Delete all records from a store (non-destructive to the store itself).
  * @param {string} store - Object store name
  * @returns {Promise<undefined>}
@@ -150,4 +202,4 @@ async function clear(store) {
   }
 }
 
-export { get, put, del, getAll, clear };
+export { get, put, del, getAll, getAllKeys, putMany, clear };

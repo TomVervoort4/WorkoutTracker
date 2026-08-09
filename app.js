@@ -8,6 +8,12 @@
 
 import { get, put, del, getAll, clear } from './db.js';
 import { renderInsightsTab, checkForNewPB } from './insights.js';
+import {
+  importFitdaysFile,
+  loadBodyComposition,
+  renderBodyTab,
+  importSummaryMessage,
+} from './bodycomp.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -131,8 +137,21 @@ const state = {
   /** All log entries from the 'logs' store. */
   logs: [],
 
-  /** All bodyweight entries from 'bodyweight' store, sorted date-asc. */
-  bodyweight: [],
+  /**
+   * NOTE: there is no `bodyweight` field here on purpose. The legacy manual
+   * bodyweight store still exists in IndexedDB and still round-trips through
+   * the JSON export, but nothing in the UI reads it any more — manual weight
+   * entry was replaced by Fitdays imports, and the insight that consumed it
+   * was retired with it. It is archival data, so it is left on disk and out
+   * of memory rather than loaded on every boot.
+   */
+
+  /**
+   * Raw Fitdays readings from the 'bodyComposition' store, sorted
+   * datetime-asc. Stored exactly as imported — the per-day series the Body tab
+   * draws is derived at render time and never written back.
+   */
+  bodyComposition: [],
 
   /**
    * Map of key → record from the 'meta' store.
@@ -142,7 +161,7 @@ const state = {
 
   /** Transient UI state — never written to IndexedDB. */
   ui: {
-    currentView: 'today',         // 'today' | 'progress' | 'plan' | 'insights' | 'data'
+    currentView: 'today',         // 'today' | 'progress' | 'body' | 'plan' | 'insights' | 'data'
     today: '',                    // 'YYYY-MM-DD'
     weekDates: [],                // [Mon … Sun] date strings for current week
     todayDayIndex: 0,             // 0=Mon … 6=Sun
@@ -424,18 +443,22 @@ function buildDefaultPlan() {
 //  DATABASE ↔ STATE SYNC
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Reads all four stores from IndexedDB into `state` in parallel. */
+/**
+ * Reads the stores the UI actually renders from into `state`, in parallel.
+ * The legacy 'bodyweight' store is deliberately not among them — see the note
+ * on `state`.
+ */
 async function loadState() {
-  const [planDoc, allLogs, allBw, allMeta] = await Promise.all([
+  const [planDoc, allLogs, allMeta, allBodyComp] = await Promise.all([
     get('plan', PLAN_DOC_ID),
     getAll('logs'),
-    getAll('bodyweight'),
     getAll('meta'),
+    loadBodyComposition(),
   ]);
 
-  state.plan       = planDoc ?? null;
-  state.logs       = allLogs ?? [];
-  state.bodyweight = (allBw ?? []).sort((a, b) => a.date.localeCompare(b.date));
+  state.plan            = planDoc ?? null;
+  state.logs            = allLogs ?? [];
+  state.bodyComposition = allBodyComp;
 
   // Flatten meta array into a lookup map for O(1) access
   state.meta = {};
@@ -559,6 +582,7 @@ function render() {
   switch (state.ui.currentView) {
     case 'today':    renderToday();        break;
     case 'progress': renderProgress();     break;
+    case 'body':     renderBodyTab(state.bodyComposition); break;
     case 'plan':     renderPlan();         break;
     case 'insights': renderInsightsTab(state); break;
     case 'data':     renderData();         break;
@@ -742,11 +766,11 @@ async function init() {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
   });
 
-  // 5. Bodyweight prompt in Today view
-  document.getElementById('bw-save-btn').addEventListener('click', handleBwSave);
-  document.getElementById('bw-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') handleBwSave();
-  });
+  // 5. Body tab — Fitdays import. The visible button drives the hidden file
+  //    input so the control is keyboard-focusable and styled like the app.
+  const bcInput = document.getElementById('bc-import-input');
+  document.getElementById('bc-import-btn').addEventListener('click', () => bcInput.click());
+  bcInput.addEventListener('change', handleFitdaysImport);
 
   // 6. Empty-plan shortcut button
   document.getElementById('go-to-plan-btn').addEventListener('click', () => switchView('plan'));
@@ -1194,9 +1218,6 @@ function renderToday() {
       `Viewing ${friendlyDateLabel(viewDate)}${isFutureDate ? ' (upcoming)' : ''}`;
   }
 
-  // Bodyweight prompt — always about today specifically, never the viewed date
-  updateBwPromptVisibility();
-
   const sessionOverview = document.getElementById('session-overview');
   const restDayCard     = document.getElementById('rest-day-card');
   const noPlanCard      = document.getElementById('no-plan-card');
@@ -1614,58 +1635,8 @@ async function handleSetCheck(exerciseId, setIndex, date) {
   const finishRow = document.getElementById('finish-session-row');
   if (finishRow) finishRow.hidden = finished || doneLogsToday.length === 0;
 
-  // Logging today's (and the week's) first set can trigger the weekly
-  // bodyweight prompt
-  updateBwPromptVisibility();
-
   // Week strip may transition from 'today' → 'inprogress'
   renderWeekStrip();
-}
-
-/**
- * Weekly bodyweight rule (Mon–Sun ISO weeks): the prompt appears on the day
- * the user logs their week's first completed session — whatever weekday that
- * is — and disappears for the rest of the week once a weight is saved.
- * Untrained days never prompt, so a week without sessions gets no prompt.
- */
-function bodyweightLoggedThisWeek() {
-  const currentWeek = isoWeekStr(parseDate(state.ui.today));
-  // Older entries predate the stored `week` field — derive it from the date
-  return state.bodyweight.some(b =>
-    (b.week ?? isoWeekStr(parseDate(b.date))) === currentWeek
-  );
-}
-
-function shouldShowBwPrompt() {
-  if (bodyweightLoggedThisWeek()) return false;
-  // Only on a day actually trained — the week's first logged session
-  return state.logs.some(l => l.date === state.ui.today && l.done);
-}
-
-function updateBwPromptVisibility() {
-  const card = document.getElementById('bw-prompt-card');
-  if (card) card.hidden = !shouldShowBwPrompt();
-}
-
-async function handleBwSave() {
-  const input = document.getElementById('bw-input');
-  const kg    = parseFloat(input.value.trim());
-  if (isNaN(kg) || kg < 20 || kg > 300) {
-    showToast('Enter a valid weight between 20 and 300 kg.');
-    return;
-  }
-  const today = state.ui.today;
-  const entry = { date: today, kg, week: isoWeekStr(parseDate(today)) };
-  await put('bodyweight', entry);
-
-  const idx = state.bodyweight.findIndex(b => b.date === today);
-  if (idx >= 0) state.bodyweight[idx] = entry;
-  else state.bodyweight.push(entry);
-  state.bodyweight.sort((a, b) => a.date.localeCompare(b.date));
-
-  input.value = '';
-  document.getElementById('bw-prompt-card').hidden = true;
-  showToast(`Bodyweight ${kg} kg logged.`);
 }
 
 async function handleFinishSession(date) {
@@ -1911,16 +1882,10 @@ async function handleRemoveExercise(exerciseId, exerciseName, date) {
 //  PROGRESS TAB
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Bodyweight moved to the Body tab, which draws it from imported Fitdays
+// readings. The old chart here was fed by the manual weight prompt that no
+// longer exists, so it would only ever have shown a frozen history.
 function renderProgress() {
-  // Bodyweight chart
-  const bwCard = document.getElementById('bw-chart-card');
-  if (state.bodyweight.length >= 2) {
-    bwCard.innerHTML = buildBwChartSVG(state.bodyweight);
-  } else {
-    bwCard.innerHTML =
-      '<p class="chart-empty">No bodyweight data yet. Log your weight on the Today tab.</p>';
-  }
-
   // Weekly volume chart
   const volCard = document.getElementById('volume-chart-card');
   const volData = buildWeeklyVolumeData();
@@ -1954,68 +1919,6 @@ function buildWeeklyVolumeData() {
     if (slot) slot.volume += log.weight * log.reps;
   }
   return weeks;
-}
-
-function buildBwChartSVG(bwData) {
-  const data = bwData.slice(-60);
-  const W = 320, H = 160;
-  const P = { top: 16, right: 12, bottom: 28, left: 44 };
-  const cW = W - P.left - P.right;
-  const cH = H - P.top  - P.bottom;
-  const n  = data.length;
-
-  const weights = data.map(b => b.kg);
-  const minW    = Math.min(...weights);
-  const maxW    = Math.max(...weights);
-  const range   = maxW - minW || 1;
-
-  const toX = i  => P.left + (i / Math.max(n - 1, 1)) * cW;
-  const toY = kg => P.top  + cH - ((kg - minW) / range) * cH;
-
-  const pts         = data.map((b, i) => [toX(i), toY(b.kg)]);
-  const polylinePts = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
-  const lastPt      = pts[pts.length - 1];
-
-  const areaD = [
-    `M ${pts[0][0].toFixed(1)},${(P.top + cH).toFixed(1)}`,
-    ...pts.map(([x, y]) => `L ${x.toFixed(1)},${y.toFixed(1)}`),
-    `L ${lastPt[0].toFixed(1)},${(P.top + cH).toFixed(1)}`,
-    'Z',
-  ].join(' ');
-
-  // Three Y-axis reference labels: min, mid, max
-  const yLabels = [0, 0.5, 1].map(frac => {
-    const kg = minW + frac * range;
-    const y  = toY(kg);
-    return `<text x="${(P.left - 5).toFixed(1)}" y="${y.toFixed(1)}"
-              dominant-baseline="middle" text-anchor="end">${kg.toFixed(1)}</text>`;
-  }).join('');
-
-  return `
-    <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"
-         style="width:100%;display:block;overflow:visible"
-         role="img" aria-label="Bodyweight trend chart">
-      <defs>
-        <linearGradient id="bwGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%"   stop-color="#00F0FF" stop-opacity="0.28"/>
-          <stop offset="100%" stop-color="#00F0FF" stop-opacity="0.02"/>
-        </linearGradient>
-      </defs>
-      <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}"
-            stroke="#21262D" stroke-width="1"/>
-      <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}"
-            stroke="#21262D" stroke-width="1"/>
-      <path d="${areaD}" fill="url(#bwGrad)"/>
-      <polyline points="${polylinePts}" fill="none" stroke="#00F0FF"
-                stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-      <circle cx="${pts[0][0].toFixed(1)}"  cy="${pts[0][1].toFixed(1)}" r="3" fill="#00F0FF"/>
-      <circle cx="${lastPt[0].toFixed(1)}"  cy="${lastPt[1].toFixed(1)}" r="4" fill="#00F0FF"/>
-      <g font-size="10" fill="#8B949E" font-family="Inter,system-ui,sans-serif">
-        ${yLabels}
-        <text x="${P.left.toFixed(1)}"          y="${H - 4}" text-anchor="middle">${data[0].date.slice(5)}</text>
-        <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle">${data[n - 1].date.slice(5)}</text>
-      </g>
-    </svg>`;
 }
 
 function buildVolumeChartSVG(weeks) {
@@ -2060,6 +1963,46 @@ function buildVolumeChartSVG(weeks) {
         <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle">${weeks[n - 1]?.label ?? ''}</text>
       </g>
     </svg>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  BODY TAB — FITDAYS IMPORT
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Show or clear the inline error under the Body tab's import control. */
+function setBodyCompError(message) {
+  const el = document.getElementById('bc-error');
+  if (!el) return;
+  el.textContent = message ?? '';
+  el.hidden = !message;
+}
+
+/**
+ * Reads the selected Fitdays export, stores whatever is new, and reports what
+ * happened. Failures surface inline on the page rather than as a toast — an
+ * import error needs to stay on screen long enough to act on.
+ */
+async function handleFitdaysImport(event) {
+  const file = event.target.files?.[0];
+  event.target.value = ''; // reset immediately so the same file can be re-picked
+  if (!file) return;
+
+  setBodyCompError(null);
+
+  const btn = document.getElementById('bc-import-btn');
+  if (btn) btn.disabled = true;
+
+  try {
+    const result = await importFitdaysFile(file);
+    state.bodyComposition = await loadBodyComposition();
+    renderBodyTab(state.bodyComposition);
+    showToast(importSummaryMessage(result));
+  } catch (err) {
+    console.error('[FitTrack] Fitdays import failed:', err);
+    setBodyCompError(err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function populateHistorySelect() {
@@ -2450,24 +2393,62 @@ async function handleSavePlan() {
 
 function renderData() {
   document.getElementById('app-version').textContent = 'v1.0.0';
+  renderStorageStatus();
+}
+
+/**
+ * Unobtrusive read-out of whether the browser granted persistent storage.
+ *
+ * `navigator.storage.persist()` is requested once at startup; this only reports
+ * the answer. Persistence exempts IndexedDB from automatic eviction under
+ * storage pressure — it does NOT survive a deliberate "clear cookies and site
+ * data" or a PWA uninstall. The real second copy is the JSON export kept
+ * somewhere off-device; treat IndexedDB as a local cache, not the only record.
+ */
+async function renderStorageStatus() {
+  const dot  = document.getElementById('storage-status-dot');
+  const text = document.getElementById('storage-status-text');
+  if (!dot || !text) return;
+
+  if (!navigator.storage?.persisted) {
+    dot.className = 'storage-status-dot storage-status-unknown';
+    text.textContent = 'This browser cannot report storage protection.';
+    return;
+  }
+
+  try {
+    const persisted = await navigator.storage.persisted();
+    dot.className = `storage-status-dot ${persisted ? 'storage-status-on' : 'storage-status-off'}`;
+    text.textContent = persisted
+      ? 'Storage protected from automatic eviction. Keep exporting anyway.'
+      : 'Storage not protected — the browser may evict it. Export regularly.';
+  } catch {
+    dot.className = 'storage-status-dot storage-status-unknown';
+    text.textContent = 'Storage protection state unavailable.';
+  }
 }
 
 async function handleExport() {
   try {
-    const [planDoc, allLogs, allBw, allMeta] = await Promise.all([
+    const [planDoc, allLogs, allBw, allMeta, allBodyComp] = await Promise.all([
       get('plan', PLAN_DOC_ID),
       getAll('logs'),
       getAll('bodyweight'),
       getAll('meta'),
+      getAll('bodyComposition'),
     ]);
 
     const payload = {
       exportedAt: new Date().toISOString(),
-      version:    1,
+      version:    2,
       plan:       planDoc,
       logs:       allLogs,
       bodyweight: allBw,
       meta:       allMeta,
+      // Raw Fitdays readings exactly as imported — no daily collapse, no
+      // derived series, no session pairing. The analysis layer derives what it
+      // needs from these; raw is the source of truth.
+      bodyComposition: allBodyComp,
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -2510,13 +2491,17 @@ async function handleImport(event) {
           clear('logs'),
           clear('bodyweight'),
           clear('meta'),
+          clear('bodyComposition'),
         ]);
 
+        // `bodyComposition` is absent from v1 backups — restoring one simply
+        // leaves the store empty rather than failing.
         await Promise.all([
           put('plan', payload.plan),
           ...payload.logs.map(l         => put('logs',       l)),
-          ...(payload.bodyweight ?? []).map(b => put('bodyweight', b)),
-          ...(payload.meta       ?? []).map(m => put('meta',       m)),
+          ...(payload.bodyweight      ?? []).map(b => put('bodyweight',      b)),
+          ...(payload.meta            ?? []).map(m => put('meta',            m)),
+          ...(payload.bodyComposition ?? []).map(r => put('bodyComposition', r)),
         ]);
 
         await loadState();
@@ -2535,7 +2520,7 @@ async function handleImport(event) {
 
 async function handleClearData() {
   showDialog(
-    'Delete ALL workouts, logs, bodyweight entries, and settings? This cannot be undone.',
+    'Delete ALL workouts, logs, body-composition readings, and settings? This cannot be undone.',
     async () => {
       try {
         await Promise.all([
@@ -2543,11 +2528,12 @@ async function handleClearData() {
           clear('logs'),
           clear('bodyweight'),
           clear('meta'),
+          clear('bodyComposition'),
         ]);
 
         state.plan                  = null;
         state.logs                  = [];
-        state.bodyweight            = [];
+        state.bodyComposition       = [];
         state.meta                  = {};
         state.ui.expandedExerciseId = null;
         state.ui.viewedDate         = state.ui.today;

@@ -2,7 +2,7 @@
  * insights.js — FitTrack · Rule-Based Insights Engine
  *
  * Deterministic, fully client-side analysis of existing session/exercise
- * logs, bodyweight entries, and session notes already stored via db.js.
+ * logs and session notes already stored via db.js.
  * No network calls, no ML — pure arithmetic and comparisons against
  * stored history. The tracker reports facts; it does not coach.
  */
@@ -46,11 +46,10 @@ const WEEKLY_VOLUME_SPIKE_PCT = 0.25; // week-over-week rise beyond this flags o
 const CONSISTENCY_WINDOW_DAYS      = 14;
 const CONSISTENCY_PLANNED_SESSIONS = 6; // 3/week x 2 weeks
 
-// Module 6 — bodyweight vs strength trend
-const BW_TREND_MIN_ENTRIES        = 4;
-const BW_TREND_MAX_ENTRIES        = 6;
-const BW_FLAT_THRESHOLD_KG        = 0.5;  // window delta below this counts as "flat"
-const STRENGTH_FLAT_THRESHOLD_PCT = 0.02; // window e1RM change below this counts as "flat"
+// Module 6 (bodyweight vs strength) was removed when manual weight entry gave
+// way to Fitdays imports. It read the manual 'bodyweight' store — now frozen —
+// and only ever considered Monday check-ins, so it could no longer fire. The
+// module numbering below is left as-is so existing comments stay accurate.
 
 // Module 7 — context-aware regression
 const CONTEXT_KEYWORDS = ['shoot', 'gig', 'event']; // configurable free-text tags in session notes
@@ -452,65 +451,6 @@ function computeConsistencyCards(logs, todayStr) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  MODULE 6 — BODYWEIGHT VS STRENGTH TREND
-// ─────────────────────────────────────────────────────────────────────────────
-
-function computeBodyweightStrengthCards(bodyweight, catalog, logs) {
-  const mondayEntries = bodyweight
-    .filter(b => localDayIndexOf(b.date) === 0)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  if (mondayEntries.length < BW_TREND_MIN_ENTRIES) return [];
-
-  const windowEntries = mondayEntries.slice(-BW_TREND_MAX_ENTRIES);
-  const bwFirst = windowEntries[0].kg;
-  const bwLast = windowEntries[windowEntries.length - 1].kg;
-  const bwDelta = bwLast - bwFirst;
-  const bwDirection = Math.abs(bwDelta) < BW_FLAT_THRESHOLD_KG ? 'flat' : (bwDelta > 0 ? 'up' : 'down');
-
-  const windowStart = windowEntries[0].date;
-  const windowEnd = windowEntries[windowEntries.length - 1].date;
-
-  const deltas = [];
-  for (const ex of catalog.values()) {
-    if (!ex.isCompound) continue;
-    const sessions = sessionsWithMetric(logs, ex.id, true)
-      .filter(s => s.date >= windowStart && s.date <= windowEnd);
-    if (sessions.length < 2) continue;
-    const first = sessions[0].value;
-    const last = sessions[sessions.length - 1].value;
-    if (!first) continue;
-    deltas.push((last - first) / first);
-  }
-  if (!deltas.length) return [];
-
-  const avgPct = deltas.reduce((s, x) => s + x, 0) / deltas.length;
-  const strengthDirection = Math.abs(avgPct) < STRENGTH_FLAT_THRESHOLD_PCT ? 'flat' : (avgPct > 0 ? 'up' : 'down');
-
-  let summary;
-  if (bwDirection === 'flat' && strengthDirection === 'flat') {
-    summary = 'Bodyweight flat, strength flat — plateau across both.';
-  } else if (bwDirection === 'up' && strengthDirection !== 'down') {
-    summary = 'Bodyweight up, strength flat/up — recomp or gain likely working.';
-  } else if (bwDirection === 'down' && strengthDirection === 'down') {
-    summary = 'Bodyweight down, strength down — possible underfueling.';
-  } else if (bwDirection === 'down') {
-    summary = 'Bodyweight down, strength flat/up — fat loss with strength preserved.';
-  } else {
-    summary = `Bodyweight ${bwDirection}, strength ${strengthDirection}.`;
-  }
-
-  const bwSign = bwDelta >= 0 ? '+' : '';
-  const pctSign = avgPct >= 0 ? '+' : '';
-  return [{
-    id: `bwstrength_${windowEnd}`,
-    title: 'Bodyweight vs strength',
-    tone: 'info',
-    text: `${summary} (bodyweight ${bwSign}${bwDelta.toFixed(1)}kg, compound e1RM ${pctSign}${Math.round(avgPct * 100)}% over last ${windowEntries.length} Monday check-ins)`,
-    date: windowEnd,
-  }];
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 //  MODULE 7 — CONTEXT-AWARE REGRESSION
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -643,7 +583,6 @@ function renderInsightsTab(state) {
   const plateauCards = computePlateauCards(catalog, state.logs);
   const volumeCards = computeWeeklyVolumeCards(state.plan, state.logs);
   const consistencyCards = computeConsistencyCards(state.logs, state.ui.today);
-  const bwStrengthCards = computeBodyweightStrengthCards(state.bodyweight, catalog, state.logs);
   const contextCards = applyContextAwareLabeling(progressionCards, consistencyCards, state.logs);
 
   const groups = [
@@ -652,7 +591,6 @@ function renderInsightsTab(state) {
     ['Plateaus', 'plateau', plateauCards],
     ['Weekly Volume', 'volume', volumeCards],
     ['Consistency', 'consistency', consistencyCards],
-    ['Bodyweight vs Strength', 'bodyweight', bwStrengthCards],
     ['Context Notes', 'context', contextCards],
   ];
 
