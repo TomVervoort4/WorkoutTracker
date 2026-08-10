@@ -2795,49 +2795,67 @@ async function buildBackupPayload() {
  * API, no OAuth, no credentials — the OS moves the file, not us.
  */
 async function handleExport() {
-  let file;
+  let json;
   try {
-    const payload = await buildBackupPayload();
-    const json    = JSON.stringify(payload, null, 2);
-    file = new File([json], `fittrack-${todayStr()}.json`, {
-      type: 'application/json',
-    });
+    json = JSON.stringify(await buildBackupPayload(), null, 2);
   } catch (err) {
     console.error('[FitTrack] Backup serialisation failed:', err);
     showToast('Backup failed — see console.');
     return;
   }
 
-  // Feature-detect with the real file: navigator.share alone doesn't imply the
-  // platform can share *files*, so canShare({ files }) must be checked first.
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+  const dateStr = todayStr();
+
+  // Prefer the OS share sheet (→ "Save to Drive"). If the platform can't share
+  // this file, fall straight through to a plain download.
+  const shareFile = pickShareableFile(json, dateStr);
+  if (shareFile) {
     try {
       await navigator.share({
-        files: [file],
+        files: [shareFile],
         title: 'FitTrack backup',
         text:  'FitTrack data backup',
       });
       showToast('Backup ready — save it to Drive.');
+      return;
     } catch (err) {
       // Dismissing the share sheet is a choice, not a failure — stay silent.
-      if (err?.name !== 'AbortError') {
-        console.error('[FitTrack] Share failed, falling back to download:', err);
-        downloadBackupFile(file);
-      }
+      if (err?.name === 'AbortError') return;
+      console.error('[FitTrack] Share failed, falling back to download:', err);
     }
-    return;
   }
 
-  // No file-sharing support on this platform — download to device instead.
-  downloadBackupFile(file);
+  downloadBackup(json, dateStr);
 }
 
-/** Save the snapshot as a file download — the fallback when sharing is absent. */
-function downloadBackupFile(file) {
-  const url = URL.createObjectURL(file);
-  const a   = Object.assign(document.createElement('a'), {
+/**
+ * The snapshot as a File the platform will actually accept for sharing, or null
+ * if it can't share files at all.
+ *
+ * Chrome's Web Share file-type allowlist is the catch here: `application/json`
+ * is NOT on it, so sharing a JSON-typed file makes `canShare` return false and
+ * silently drops us to a download with no "Save to Drive" sheet — exactly the
+ * bug this fixes. The allowlist is matched on MIME type, and `text/plain` IS on
+ * it, so we present the snapshot as text/plain. We keep the `.json` filename
+ * first (carried through since the check is MIME- not extension-based) and fall
+ * back to a `.txt` name only for any build that additionally gates on extension.
+ */
+function pickShareableFile(json, dateStr) {
+  if (!navigator.canShare) return null;
+  const candidates = [
+    new File([json], `fittrack-${dateStr}.json`, { type: 'text/plain' }),
+    new File([json], `fittrack-${dateStr}.txt`,  { type: 'text/plain' }),
+  ];
+  return candidates.find(f => navigator.canShare({ files: [f] })) ?? null;
+}
+
+/** Save the snapshot as a real .json download — the fallback when sharing is absent. */
+function downloadBackup(json, dateStr) {
+  const blob = new Blob([json], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = Object.assign(document.createElement('a'), {
     href:     url,
-    download: file.name,
+    download: `fittrack-${dateStr}.json`,
   });
   document.body.appendChild(a);
   a.click();

@@ -23,6 +23,14 @@ data in and out and serialises/deserialises it.
   the file — the previous behaviour, unchanged.
 - The share hand-off is the app's **only** network interaction. No Google Drive
   API, no OAuth, no credentials in the app — the OS moves the file.
+- **File type gotcha:** Chrome's Web Share allowlist is keyed on MIME type and
+  does **not** include `application/json`. Sharing a JSON-typed file makes
+  `canShare` return false, silently dropping to a download with no share sheet.
+  The snapshot is therefore shared as `text/plain` (which is allowlisted), while
+  the `.json` filename is kept (the check is MIME- not extension-based). A
+  `.txt`-named copy is tried as a fallback for any build that also gates on
+  extension (`pickShareableFile`). The download fallback always writes a real
+  `application/json` `.json` file.
 - Dismissing the share sheet (`AbortError`) is treated as a user choice, not an
   error. No silent/auto upload — every backup is user-initiated.
 
