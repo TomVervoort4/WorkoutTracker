@@ -31,6 +31,18 @@ data in and out and serialises/deserialises it.
   `.txt`-named copy is tried as a fallback for any build that also gates on
   extension (`pickShareableFile`). The download fallback always writes a real
   `application/json` `.json` file.
+- **User-activation gotcha (Chrome Android):** `navigator.share()` needs the
+  tap's transient user activation, and `await`-ing anything (e.g. an IndexedDB
+  read) before calling it voids that activation — Chrome then throws
+  `NotAllowedError: Permission denied` and the code drops to a download. So the
+  snapshot is serialised ahead of time when the Data tab opens
+  (`prepareBackupSnapshot`), and `handleExport` stays synchronous up to the
+  `share()` call, sourcing the prebuilt JSON. Nothing on the Data tab mutates
+  data between opening it and tapping Back up, so the prepared snapshot is always
+  current.
+- A collapsed **"Backup sharing diagnostics"** panel on the Data tab reports the
+  browser's Web Share capabilities and the last backup outcome — kept as a
+  self-service troubleshooting aid.
 - Dismissing the share sheet (`AbortError`) is treated as a user choice, not an
   error. No silent/auto upload — every backup is user-initiated.
 

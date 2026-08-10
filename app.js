@@ -2715,6 +2715,8 @@ function renderData() {
   document.getElementById('app-version').textContent = 'v1.0.0';
   renderStorageStatus();
   renderShareDiagnostics();
+  // Serialise a fresh snapshot now so Back up can call share() synchronously.
+  prepareBackupSnapshot();
 
   // Surface the orphan-naming card only when there is something to name.
   const orphanCount = findOrphanExerciseIds().length;
@@ -2832,50 +2834,84 @@ function renderShareDiagnostics() {
   ].join('\n');
 }
 
-async function handleExport() {
-  let json;
+/**
+ * The most recent snapshot, serialised and ready to hand to the share sheet.
+ * Built asynchronously when the Data tab opens (see `prepareBackupSnapshot`) so
+ * that the Back-up tap can call `navigator.share()` SYNCHRONOUSLY.
+ *
+ * This is the crux of getting "Save to Drive" to work on Chrome Android: Web
+ * Share requires transient user activation, and `await`-ing anything (like an
+ * IndexedDB read) before `share()` breaks the activation chain — Chrome then
+ * rejects the call with `NotAllowedError: Permission denied` and we fall back to
+ * a plain download. Nothing on the Data tab mutates data between opening it and
+ * tapping Back up, so a snapshot prepared on tab-open is still current at tap.
+ */
+let preparedBackup = null; // { json, dateStr } | null
+
+/** Serialise the current snapshot ahead of time; safe to await, runs off-gesture. */
+async function prepareBackupSnapshot() {
   try {
-    json = JSON.stringify(await buildBackupPayload(), null, 2);
+    const payload = await buildBackupPayload();
+    preparedBackup = { json: JSON.stringify(payload, null, 2), dateStr: todayStr() };
   } catch (err) {
-    console.error('[FitTrack] Backup serialisation failed:', err);
-    showToast('Backup failed — see console.');
+    console.error('[FitTrack] Could not prepare backup snapshot:', err);
+    preparedBackup = null;
+  }
+  renderShareDiagnostics();
+}
+
+/**
+ * Hand the prepared snapshot to the OS share sheet (→ "Save to Drive"), or fall
+ * back to a download. MUST stay synchronous up to the `navigator.share()` call —
+ * no `await` before it — or Chrome Android voids the tap's user activation and
+ * throws NotAllowedError. All the async work already happened in
+ * `prepareBackupSnapshot`; here we only touch the in-memory `preparedBackup`.
+ */
+function handleExport() {
+  const snap = preparedBackup;
+
+  // Snapshot not ready yet (tab opened and tapped in the same instant): we can't
+  // share outside the gesture, so just build and download.
+  if (!snap) {
+    buildBackupPayload()
+      .then(p => downloadBackup(JSON.stringify(p, null, 2), todayStr()))
+      .catch(err => {
+        console.error('[FitTrack] Backup failed:', err);
+        showToast('Backup failed — see console.');
+      });
     return;
   }
 
-  const dateStr = todayStr();
-
-  // Prefer the OS share sheet (→ "Save to Drive"). If the platform can't share
-  // this file, fall straight through to a plain download. `lastShareOutcome` is
-  // a diagnostic breadcrumb shown in the Data tab so a device that only ever
-  // downloads can be told apart from one where the sheet was cancelled.
+  const { json, dateStr } = snap;
   const shareFile = pickShareableFile(json, dateStr);
+
   if (shareFile) {
-    try {
-      await navigator.share({
-        files: [shareFile],
-        title: 'FitTrack backup',
-        text:  'FitTrack data backup',
-      });
-      state.ui.lastShareOutcome = `shared OK as ${shareFile.name}`;
-      renderShareDiagnostics();
-      showToast('Backup ready — save it to Drive.');
-      return;
-    } catch (err) {
-      // Dismissing the share sheet is a choice, not a failure — stay silent.
-      if (err?.name === 'AbortError') {
-        state.ui.lastShareOutcome = 'share sheet cancelled';
-        renderShareDiagnostics();
-        return;
-      }
-      state.ui.lastShareOutcome = `share() threw ${err?.name || 'Error'}: ${err?.message || err}`;
-      console.error('[FitTrack] Share failed, falling back to download:', err);
-    }
-  } else {
-    state.ui.lastShareOutcome = navigator.canShare
-      ? 'canShare() rejected both .json and .txt (file sharing not offered)'
-      : 'navigator.canShare is unavailable on this browser';
+    // Synchronous call — activation intact. Outcome handled in the promise.
+    navigator.share({
+      files: [shareFile],
+      title: 'FitTrack backup',
+      text:  'FitTrack data backup',
+    })
+      .then(() => {
+        state.ui.lastShareOutcome = `shared OK as ${shareFile.name}`;
+        showToast('Backup ready — save it to Drive.');
+      })
+      .catch(err => {
+        if (err?.name === 'AbortError') {
+          state.ui.lastShareOutcome = 'share sheet cancelled';
+        } else {
+          state.ui.lastShareOutcome = `share() threw ${err?.name || 'Error'}: ${err?.message || err}`;
+          console.error('[FitTrack] Share failed, falling back to download:', err);
+          downloadBackup(json, dateStr);
+        }
+      })
+      .finally(renderShareDiagnostics);
+    return;
   }
 
+  state.ui.lastShareOutcome = navigator.canShare
+    ? 'canShare() rejected both .json and .txt (file sharing not offered)'
+    : 'navigator.canShare is unavailable on this browser';
   downloadBackup(json, dateStr);
   renderShareDiagnostics();
 }
