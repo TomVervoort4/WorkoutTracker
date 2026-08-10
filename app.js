@@ -13,6 +13,11 @@ import {
   loadBodyComposition,
   renderBodyTab,
   importSummaryMessage,
+  toDailySeries,
+  buildRecompChartSVG,
+  fmt as bcFmt,
+  deltaBadge as bcDeltaBadge,
+  longDate as bcLongDate,
 } from './bodycomp.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,7 +193,7 @@ const state = {
 
   /** Transient UI state — never written to IndexedDB. */
   ui: {
-    currentView: 'today',         // 'today' | 'progress' | 'body' | 'plan' | 'insights' | 'data'
+    currentView: 'hub',           // 'hub' | 'today' | 'progress' | 'body' | 'plan' | 'insights' | 'data'
     today: '',                    // 'YYYY-MM-DD'
     weekDates: [],                // [Mon … Sun] date strings for current week
     todayDayIndex: 0,             // 0=Mon … 6=Sun
@@ -806,6 +811,7 @@ function render() {
   renderWeekStrip();
 
   switch (state.ui.currentView) {
+    case 'hub':      renderHub();          break;
     case 'today':    renderToday();        break;
     case 'progress': renderProgress();     break;
     case 'body':     renderBodyTab(state.bodyComposition); break;
@@ -1457,6 +1463,396 @@ function getExerciseName(exerciseId) {
   if (named?.exerciseName) return named.exerciseName;
 
   return UNNAMED_EXERCISE_PLACEHOLDER;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  HUB — THE DASHBOARD LANDING VIEW
+//
+//  Pure presentation over data already in the app. No new sources, no coaching
+//  inference — every figure here is a deterministic read of the plan, the logs,
+//  and the stored Fitdays readings, formatted in the house style established by
+//  the body-composition page (shared tokens, shared recomposition chart).
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** 'YYYY-MM-DD' offset by a number of days from a base date string. */
+function dateStrPlus(baseStr, days) {
+  const d = parseDate(baseStr);
+  return formatDate(new Date(d.getFullYear(), d.getMonth(), d.getDate() + days));
+}
+
+/** Distinct dates that hold at least one done set or a finished marker. */
+function sessionDatesSet() {
+  const dates = new Set();
+  for (const l of state.logs) if (l.done) dates.add(l.date);
+  const finishedMap = state.meta[FINISHED_KEY]?.value ?? {};
+  for (const d in finishedMap) if (finishedMap[d]) dates.add(d);
+  return dates;
+}
+
+/** Sessions logged within the current Mon–Sun week. */
+function sessionsThisWeek() {
+  const dates = sessionDatesSet();
+  return state.ui.weekDates.filter(d => dates.has(d)).length;
+}
+
+/** Sessions logged in the current calendar month. */
+function sessionsThisMonth() {
+  const ym = state.ui.today.slice(0, 7);
+  let n = 0;
+  for (const d of sessionDatesSet()) if (d.startsWith(ym)) n++;
+  return n;
+}
+
+/**
+ * Consecutive Mon–Sun weeks (ending at the most recent active week) that each
+ * hold at least one session. A current week with no session yet does not break
+ * the streak — it is counted from last week so a fresh week never reads as zero.
+ */
+function trainingWeekStreak() {
+  const dates = sessionDatesSet();
+  if (!dates.size) return 0;
+
+  const weekHasSession = mon => {
+    for (let i = 0; i < 7; i++) {
+      const ds = formatDate(new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + i));
+      if (dates.has(ds)) return true;
+    }
+    return false;
+  };
+
+  let mon = getMondayOf(new Date());
+  if (!weekHasSession(mon)) mon = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() - 7);
+
+  let streak = 0;
+  while (weekHasSession(mon)) {
+    streak++;
+    mon = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() - 7);
+  }
+  return streak;
+}
+
+/**
+ * The next thing the plan calls for: today's session if it is a training day
+ * that isn't finished yet, otherwise the next training day within two weeks.
+ * Returns null when nothing is scheduled (all rest / no plan).
+ */
+function findNextSession() {
+  const finishedMap = state.meta[FINISHED_KEY]?.value ?? {};
+  for (let i = 0; i < 14; i++) {
+    const date = dateStrPlus(state.ui.today, i);
+    const { dayPlan, allExercises } = resolveExercisesForDate(date);
+    if (!allExercises.length) continue;               // rest day
+    if (i === 0 && finishedMap[date]) continue;       // today already done → look ahead
+    return { date, dayPlan, exercises: allExercises, offset: i };
+  }
+  return null;
+}
+
+/** Exercises actually logged (done) on a date, resolved to names. */
+function loggedExercisesOnDate(date) {
+  const ids = [...new Set(
+    state.logs.filter(l => l.date === date && l.done).map(l => l.exerciseId)
+  )];
+  return ids.map(id => ({ id, name: getExerciseName(id) }));
+}
+
+/** The most recent past/today date that has a logged session. */
+function findMostRecentSession() {
+  const dates = [...sessionDatesSet()].filter(d => d <= state.ui.today).sort();
+  const date = dates[dates.length - 1];
+  if (!date) return null;
+  const { dayPlan } = resolveExercisesForDate(date);
+  return { date, dayPlan, exercises: loggedExercisesOnDate(date) };
+}
+
+/**
+ * Recent personal records — a deterministic per-exercise best-set lookup, not
+ * analysis. An exercise's all-time best set (heaviest weight, or longest hold
+ * for seconds-based work) counts as "recent" when it was set within the window.
+ */
+function getRecentPRs(withinDays = 30, limit = 4) {
+  const cutoff = dateStrPlus(state.ui.today, -withinDays);
+  const ids = [...new Set(state.logs.filter(l => l.done).map(l => l.exerciseId))];
+  const prs = [];
+
+  for (const id of ids) {
+    const unit = getExerciseUnit(id);
+    const pr = getPRForExercise(id, unit);
+    if (!pr || pr.date < cutoff) continue;
+    prs.push({
+      id,
+      name: getExerciseName(id),
+      value: unit === 'seconds' ? `${pr.reps}s` : `${pr.weight}kg`,
+      date: pr.date,
+    });
+  }
+
+  prs.sort((a, b) => b.date.localeCompare(a.date));
+  return prs.slice(0, limit);
+}
+
+// ── HUB SECTION BUILDERS ─────────────────────────────────────────────────────
+
+/** Relative label for the next-session date. */
+function nextSessionWhen(offset, date) {
+  if (offset === 0) return 'Today';
+  if (offset === 1) return 'Tomorrow';
+  if (offset < 7)   return DAY_NAMES_LONG[dayIndexOf(date)];
+  return friendlyDateLabel(date);
+}
+
+function buildHubNextUp() {
+  const next = findNextSession();
+
+  if (next) {
+    const { date, dayPlan, exercises, offset } = next;
+    const when = nextSessionWhen(offset, date);
+    const name = dayPlan?.sessionName || 'Training session';
+    const shown = exercises.slice(0, 4);
+    const rest = exercises.length - shown.length;
+    const chips = shown
+      .map(ex => `<span class="hub-chip">${escHtml(ex.name)}</span>`)
+      .join('') + (rest > 0 ? `<span class="hub-chip hub-chip-more">+${rest}</span>` : '');
+    const cta = offset === 0 ? 'Start session' : 'Preview session';
+
+    return `
+      <button class="card hub-card hub-next" data-hub-action="open-session" data-date="${escHtml(date)}">
+        <div class="hub-next-head">
+          <span class="hub-eyebrow">${escHtml(when)} · Next up</span>
+          <span class="hub-next-count">${exercises.length} exercises</span>
+        </div>
+        <h2 class="hub-next-title">${escHtml(name)}</h2>
+        <div class="hub-chips">${chips}</div>
+        <span class="hub-next-cta">${cta}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="9 18 15 12 9 6"/></svg>
+        </span>
+      </button>`;
+  }
+
+  // Nothing scheduled — recap the most recent session, or invite plan setup.
+  const recent = findMostRecentSession();
+  if (recent) {
+    const shown = recent.exercises.slice(0, 4);
+    const rest = recent.exercises.length - shown.length;
+    const chips = shown
+      .map(ex => `<span class="hub-chip">${escHtml(ex.name)}</span>`)
+      .join('') + (rest > 0 ? `<span class="hub-chip hub-chip-more">+${rest}</span>` : '');
+    return `
+      <button class="card hub-card hub-next hub-next-rest" data-hub-action="open-session" data-date="${escHtml(recent.date)}">
+        <div class="hub-next-head">
+          <span class="hub-eyebrow">Rest day · Last session</span>
+          <span class="hub-next-count">${escHtml(friendlyDateLabel(recent.date))}</span>
+        </div>
+        <h2 class="hub-next-title">${escHtml(recent.dayPlan?.sessionName || 'Session')}</h2>
+        <div class="hub-chips">${chips}</div>
+        <span class="hub-next-cta">Review
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="9 18 15 12 9 6"/></svg>
+        </span>
+      </button>`;
+  }
+
+  return `
+    <button class="card hub-card hub-next hub-next-empty" data-hub-action="open-plan">
+      <span class="hub-eyebrow">Welcome to FitTrack</span>
+      <h2 class="hub-next-title">Set up your weekly plan</h2>
+      <p class="hub-next-sub">Assign sessions to your training days, then log them as you go.</p>
+      <span class="hub-next-cta">Build your plan
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="9 18 15 12 9 6"/></svg>
+      </span>
+    </button>`;
+}
+
+function buildHubConsistency() {
+  const thisWeek = sessionsThisWeek();
+  const streak   = trainingWeekStreak();
+  const month    = sessionsThisMonth();
+
+  // Seven compact dots mirroring the week strip's status colours.
+  const dots = state.ui.weekDates.map(d => {
+    const status = getDayStatus(d);
+    return `<span class="hub-dot hub-dot-${status}" title="${escHtml(friendlyDateLabel(d))}"></span>`;
+  }).join('');
+
+  return `
+    <div class="card hub-card hub-consistency">
+      <div class="hub-stat-row">
+        <div class="hub-stat">
+          <span class="hub-stat-value">${thisWeek}</span>
+          <span class="hub-stat-label">This week</span>
+        </div>
+        <div class="hub-stat">
+          <span class="hub-stat-value">${streak}<span class="hub-stat-unit">wk</span></span>
+          <span class="hub-stat-label">Streak</span>
+        </div>
+        <div class="hub-stat">
+          <span class="hub-stat-value">${month}</span>
+          <span class="hub-stat-label">This month</span>
+        </div>
+      </div>
+      <div class="hub-week-dots" role="img" aria-label="${thisWeek} sessions logged this week">${dots}</div>
+    </div>`;
+}
+
+function buildHubBody(days) {
+  if (!days.length) {
+    return `
+      <button class="card hub-card hub-body-empty" data-hub-action="import">
+        <div class="hub-body-empty-icon" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 17l5.5-6 4 4L21 6"/><path d="M15 6h6v6"/></svg>
+        </div>
+        <div class="hub-body-empty-text">
+          <span class="hub-card-title">Body composition</span>
+          <span class="hub-body-empty-sub">Import a Fitdays export to track weight, body fat and recomposition.</span>
+        </div>
+        <span class="hub-body-empty-cta">Import</span>
+      </button>`;
+  }
+
+  const latest = days[days.length - 1];
+  const prev   = days.length > 1 ? days[days.length - 2] : null;
+  const since  = prev?.date ?? null;
+
+  return `
+    <div class="card hub-card hub-body">
+      <div class="hub-card-head">
+        <span class="hub-card-title">Body composition</span>
+        <span class="hub-card-meta">${escHtml(bcLongDate(latest.date))}</span>
+      </div>
+      <div class="hub-body-figures">
+        <div class="hub-figure">
+          <span class="hub-figure-label">Weight</span>
+          <span class="hub-figure-value">${bcFmt(latest.weight)}<span class="hub-figure-unit">kg</span></span>
+          ${bcDeltaBadge(latest.weight, prev?.weight, 1, 'kg', since)}
+        </div>
+        <div class="hub-figure">
+          <span class="hub-figure-label">Body fat</span>
+          <span class="hub-figure-value">${bcFmt(latest.bodyFat)}<span class="hub-figure-unit">%</span></span>
+          ${bcDeltaBadge(latest.bodyFat, prev?.bodyFat, 1, '%', since)}
+        </div>
+      </div>
+      <div class="hub-body-split">
+        <div class="hub-split-item">
+          <span class="bc-swatch bc-swatch-lean" aria-hidden="true"></span>
+          <span class="hub-split-label">Lean</span>
+          <span class="hub-split-value">${bcFmt(latest.leanMass)} kg</span>
+          ${bcDeltaBadge(latest.leanMass, prev?.leanMass, 1, 'kg', null)}
+        </div>
+        <div class="hub-split-item">
+          <span class="bc-swatch bc-swatch-fat" aria-hidden="true"></span>
+          <span class="hub-split-label">Fat</span>
+          <span class="hub-split-value">${bcFmt(latest.fatMass)} kg</span>
+          ${bcDeltaBadge(latest.fatMass, prev?.fatMass, 1, 'kg', null)}
+        </div>
+      </div>
+    </div>`;
+}
+
+function buildHubTrend(days) {
+  const svg = buildRecompChartSVG(days);
+  if (!svg) return ''; // fewer than two comparable readings — the body card already invites more
+
+  return `
+    <button class="card hub-card hub-trend" data-hub-action="open-body">
+      <div class="hub-card-head">
+        <span class="hub-card-title">Recomposition</span>
+        <div class="hub-legend">
+          <span class="hub-legend-item"><span class="bc-swatch bc-swatch-lean" aria-hidden="true"></span>Lean</span>
+          <span class="hub-legend-item"><span class="bc-swatch bc-swatch-fat" aria-hidden="true"></span>Fat</span>
+        </div>
+      </div>
+      ${svg}
+      <span class="hub-trend-link">View full trend
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="9 18 15 12 9 6"/></svg>
+      </span>
+    </button>`;
+}
+
+function buildHubPRs() {
+  const prs = getRecentPRs();
+  const inner = prs.length
+    ? prs.map(pr => `
+        <div class="hub-pr-row">
+          <span class="hub-pr-name">${escHtml(pr.name)}</span>
+          <span class="hub-pr-value">${escHtml(pr.value)}</span>
+          <span class="hub-pr-date">${escHtml(friendlyDateLabel(pr.date))}</span>
+        </div>`).join('')
+    : `<p class="hub-pr-empty">No records in the last month. Log a heavy set to start setting them.</p>`;
+
+  return `
+    <div class="card hub-card hub-prs">
+      <div class="hub-card-head">
+        <span class="hub-card-title">Recent PRs</span>
+        ${prs.length ? '<span class="hub-card-meta">last 30 days</span>' : ''}
+      </div>
+      <div class="hub-pr-list">${inner}</div>
+    </div>`;
+}
+
+function buildHubQuickActions() {
+  const action = (act, label, path) => `
+    <button class="hub-action" data-hub-action="${act}">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>
+      <span>${label}</span>
+    </button>`;
+
+  return `
+    <div class="hub-actions">
+      ${action('log', 'Log session', '<path d="M12 5v14"/><path d="M5 12h14"/>')}
+      ${action('import', 'Import scale', '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>')}
+      ${action('export', 'Back up', '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>')}
+    </div>`;
+}
+
+function renderHub() {
+  const host = document.getElementById('hub-content');
+  if (!host) return;
+
+  const days = toDailySeries(state.bodyComposition);
+
+  host.innerHTML =
+    buildHubNextUp() +
+    buildHubConsistency() +
+    buildHubBody(days) +
+    buildHubTrend(days) +
+    buildHubPRs() +
+    buildHubQuickActions();
+
+  wireHub();
+}
+
+/** Delegated wiring for every hub card and quick action. */
+function wireHub() {
+  const host = document.getElementById('hub-content');
+  host.querySelectorAll('[data-hub-action]').forEach(el => {
+    el.addEventListener('click', () => {
+      switch (el.dataset.hubAction) {
+        case 'open-session':
+          state.ui.viewedDate = el.dataset.date || state.ui.today;
+          state.ui.expandedExerciseId = null;
+          switchView('today');
+          break;
+        case 'open-plan':  switchView('plan');     break;
+        case 'open-body':  switchView('body');     break;
+        case 'log':
+          state.ui.viewedDate = state.ui.today;
+          switchView('today');
+          break;
+        case 'import':     document.getElementById('bc-import-input')?.click(); break;
+        case 'export':     handleExport();         break;
+      }
+    });
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

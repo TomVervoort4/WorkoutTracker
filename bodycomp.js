@@ -785,4 +785,11 @@ export {
   parseFitdaysWorkbook,
   toDailySeries,
   METRICS,
+  // Exported so the Hub dashboard renders the signature recomposition chart and
+  // formats body-comp figures identically to the Body page — one house style.
+  buildRecompChartSVG,
+  fmt,
+  deltaBadge,
+  shortDate,
+  longDate,
 };

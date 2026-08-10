@@ -44,8 +44,14 @@
   ═══════════════════════════════════════════ -->
   <main class="main-content" id="main-content">
 
+    <!-- ── HUB (HOME) TAB — the dashboard landing view ── -->
+    <section class="tab-view active" id="view-hub" role="tabpanel" aria-label="Dashboard">
+      <!-- JS renders the dashboard sections into here -->
+      <div class="hub" id="hub-content"></div>
+    </section>
+
     <!-- ── TODAY TAB ── -->
-    <section class="tab-view active" id="view-today" role="tabpanel" aria-label="Today's workout">
+    <section class="tab-view" id="view-today" role="tabpanel" aria-label="Today's workout" hidden>
 
       <!-- Viewing-a-different-date banner — shown only when viewing a past/future date -->
       <div class="viewing-date-banner" id="viewing-date-banner" hidden>
@@ -342,7 +348,14 @@
        BOTTOM TAB NAVIGATION
   ═══════════════════════════════════════════ -->
   <nav class="bottom-nav" aria-label="Main navigation">
-    <button class="nav-tab active-tab" data-view="today" aria-label="Today's workout" aria-selected="true" role="tab">
+    <button class="nav-tab active-tab" data-view="hub" aria-label="Dashboard" aria-selected="true" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 11.5 12 4l9 7.5"/>
+        <path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/>
+      </svg>
+      <span>Home</span>
+    </button>
+    <button class="nav-tab" data-view="today" aria-label="Today's workout" aria-selected="false" role="tab">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M18 8h1a4 4 0 0 1 0 8h-1"/>
         <path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/>
