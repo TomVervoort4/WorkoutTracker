@@ -19,6 +19,10 @@ import {
 //  CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Bumped in lockstep with the service-worker cache version; shown in the Data
+// tab's sharing diagnostics so a screenshot self-identifies which build is live.
+const BUILD_ID = 'v12';
+
 const DAY_NAMES_LONG  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const DAY_NAMES_SHORT = ['M','T','W','T','F','S','S'];
 const MONTH_NAMES     = [
@@ -2822,13 +2826,19 @@ function renderShareDiagnostics() {
     window.matchMedia?.('(display-mode: standalone)')?.matches === true ||
     window.navigator.standalone === true;
 
+  const prepared = preparedBackup
+    ? (preparedBackup.file ? `yes (${preparedBackup.file.name})` : 'built, not shareable')
+    : 'none yet';
+
   el.textContent = [
+    `build            : ${BUILD_ID}`,
     `secure context   : ${window.isSecureContext}`,
     `standalone (PWA) : ${standalone}`,
     `navigator.share  : ${typeof navigator.share !== 'undefined' ? 'present' : 'MISSING'}`,
     `navigator.canShare: ${typeof navigator.canShare !== 'undefined' ? 'present' : 'MISSING'}`,
     `canShare .json   : ${probe('fittrack.json')}`,
     `canShare .txt    : ${probe('fittrack.txt')}`,
+    `prepared file    : ${prepared}`,
     `last backup      : ${state.ui.lastShareOutcome ?? '— (not tried yet)'}`,
     `user agent       : ${navigator.userAgent}`,
   ].join('\n');
@@ -2846,13 +2856,20 @@ function renderShareDiagnostics() {
  * a plain download. Nothing on the Data tab mutates data between opening it and
  * tapping Back up, so a snapshot prepared on tab-open is still current at tap.
  */
-let preparedBackup = null; // { json, dateStr } | null
+let preparedBackup = null; // { file, json, dateStr } | null
 
-/** Serialise the current snapshot ahead of time; safe to await, runs off-gesture. */
+/**
+ * Serialise the current snapshot AND pre-build the shareable File ahead of time,
+ * off-gesture. Pre-creating the File means the Back-up tap does the absolute
+ * minimum synchronous work before `navigator.share()` — just reads a variable —
+ * giving the tap's user activation the best possible chance of surviving.
+ */
 async function prepareBackupSnapshot() {
   try {
     const payload = await buildBackupPayload();
-    preparedBackup = { json: JSON.stringify(payload, null, 2), dateStr: todayStr() };
+    const json    = JSON.stringify(payload, null, 2);
+    const dateStr = todayStr();
+    preparedBackup = { file: pickShareableFile(json, dateStr), json, dateStr };
   } catch (err) {
     console.error('[FitTrack] Could not prepare backup snapshot:', err);
     preparedBackup = null;
@@ -2882,25 +2899,32 @@ function handleExport() {
     return;
   }
 
-  const { json, dateStr } = snap;
-  const shareFile = pickShareableFile(json, dateStr);
+  const { file, json, dateStr } = snap;
 
-  if (shareFile) {
-    // Synchronous call — activation intact. Outcome handled in the promise.
+  // Snapshot of the tap's activation state at the instant we call share(). If
+  // this reads active=false, the gesture was lost before the call (an ordering
+  // bug); if active=true and share() still throws, the block is elsewhere
+  // (e.g. a Permissions-Policy on the host), which needs a different fix.
+  const act = navigator.userActivation
+    ? `active=${navigator.userActivation.isActive}`
+    : 'active=n/a';
+
+  if (file) {
+    // Absolute minimum before share(): read a var, capture activation, call.
     navigator.share({
-      files: [shareFile],
+      files: [file],
       title: 'FitTrack backup',
       text:  'FitTrack data backup',
     })
       .then(() => {
-        state.ui.lastShareOutcome = `shared OK as ${shareFile.name}`;
+        state.ui.lastShareOutcome = `shared OK as ${file.name} (${act})`;
         showToast('Backup ready — save it to Drive.');
       })
       .catch(err => {
         if (err?.name === 'AbortError') {
-          state.ui.lastShareOutcome = 'share sheet cancelled';
+          state.ui.lastShareOutcome = `share sheet cancelled (${act})`;
         } else {
-          state.ui.lastShareOutcome = `share() threw ${err?.name || 'Error'}: ${err?.message || err}`;
+          state.ui.lastShareOutcome = `share() threw ${err?.name || 'Error'}: ${err?.message || err} (${act})`;
           console.error('[FitTrack] Share failed, falling back to download:', err);
           downloadBackup(json, dateStr);
         }
@@ -2910,7 +2934,7 @@ function handleExport() {
   }
 
   state.ui.lastShareOutcome = navigator.canShare
-    ? 'canShare() rejected both .json and .txt (file sharing not offered)'
+    ? `canShare() rejected both .json and .txt (${act})`
     : 'navigator.canShare is unavailable on this browser';
   downloadBackup(json, dateStr);
   renderShareDiagnostics();
