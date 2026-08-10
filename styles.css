@@ -2356,6 +2356,30 @@ a { color: var(--color-accent); text-decoration: none; }
 .storage-status-off     { background-color: var(--color-warning); }
 .storage-status-unknown { background-color: var(--color-border-muted); }
 
+/* ── Backup-sharing diagnostics (troubleshooting only) ── */
+.share-diag-card { margin-top: 12px; }
+
+.share-diag-summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-secondary);
+}
+
+.share-diag {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background-color: var(--color-surface-muted, rgba(127, 127, 127, 0.1));
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
 /* ── Motion preferences ─────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .bc-line,

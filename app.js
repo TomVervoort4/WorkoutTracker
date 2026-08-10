@@ -2714,6 +2714,7 @@ async function handleSavePlan() {
 function renderData() {
   document.getElementById('app-version').textContent = 'v1.0.0';
   renderStorageStatus();
+  renderShareDiagnostics();
 
   // Surface the orphan-naming card only when there is something to name.
   const orphanCount = findOrphanExerciseIds().length;
@@ -2794,6 +2795,43 @@ async function buildBackupPayload() {
  * download. This share hand-off is the app's ONLY network interaction: no Drive
  * API, no OAuth, no credentials — the OS moves the file, not us.
  */
+/**
+ * Read-out of what this browser actually supports for Web Share, shown in a
+ * collapsed panel on the Data tab. Pure local capability probing — no network,
+ * no state change. Exists to diagnose "Back up only downloads" on a real device
+ * we can't attach a console to: it distinguishes a missing API, a rejected file
+ * type, a thrown share(), and a cancelled sheet from one another.
+ */
+function renderShareDiagnostics() {
+  const el = document.getElementById('share-diag');
+  if (!el) return;
+
+  const probe = (name) => {
+    if (!navigator.canShare) return 'n/a';
+    try {
+      return navigator.canShare({ files: [new File(['{}'], name, { type: 'text/plain' })] })
+        ? 'yes' : 'no';
+    } catch {
+      return 'error';
+    }
+  };
+
+  const standalone =
+    window.matchMedia?.('(display-mode: standalone)')?.matches === true ||
+    window.navigator.standalone === true;
+
+  el.textContent = [
+    `secure context   : ${window.isSecureContext}`,
+    `standalone (PWA) : ${standalone}`,
+    `navigator.share  : ${typeof navigator.share !== 'undefined' ? 'present' : 'MISSING'}`,
+    `navigator.canShare: ${typeof navigator.canShare !== 'undefined' ? 'present' : 'MISSING'}`,
+    `canShare .json   : ${probe('fittrack.json')}`,
+    `canShare .txt    : ${probe('fittrack.txt')}`,
+    `last backup      : ${state.ui.lastShareOutcome ?? '— (not tried yet)'}`,
+    `user agent       : ${navigator.userAgent}`,
+  ].join('\n');
+}
+
 async function handleExport() {
   let json;
   try {
@@ -2807,7 +2845,9 @@ async function handleExport() {
   const dateStr = todayStr();
 
   // Prefer the OS share sheet (→ "Save to Drive"). If the platform can't share
-  // this file, fall straight through to a plain download.
+  // this file, fall straight through to a plain download. `lastShareOutcome` is
+  // a diagnostic breadcrumb shown in the Data tab so a device that only ever
+  // downloads can be told apart from one where the sheet was cancelled.
   const shareFile = pickShareableFile(json, dateStr);
   if (shareFile) {
     try {
@@ -2816,16 +2856,28 @@ async function handleExport() {
         title: 'FitTrack backup',
         text:  'FitTrack data backup',
       });
+      state.ui.lastShareOutcome = `shared OK as ${shareFile.name}`;
+      renderShareDiagnostics();
       showToast('Backup ready — save it to Drive.');
       return;
     } catch (err) {
       // Dismissing the share sheet is a choice, not a failure — stay silent.
-      if (err?.name === 'AbortError') return;
+      if (err?.name === 'AbortError') {
+        state.ui.lastShareOutcome = 'share sheet cancelled';
+        renderShareDiagnostics();
+        return;
+      }
+      state.ui.lastShareOutcome = `share() threw ${err?.name || 'Error'}: ${err?.message || err}`;
       console.error('[FitTrack] Share failed, falling back to download:', err);
     }
+  } else {
+    state.ui.lastShareOutcome = navigator.canShare
+      ? 'canShare() rejected both .json and .txt (file sharing not offered)'
+      : 'navigator.canShare is unavailable on this browser';
   }
 
   downloadBackup(json, dateStr);
+  renderShareDiagnostics();
 }
 
 /**
