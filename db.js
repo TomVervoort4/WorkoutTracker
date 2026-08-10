@@ -52,7 +52,9 @@ function openDB() {
       _db = event.target.result;
 
       _db.onversionchange = () => {
-        _db.close();
+        // Guard against a double-fire (e.g. another tab deleting/upgrading the
+        // DB) landing after _db was already closed and nulled.
+        _db?.close();
         _db = null;
       };
 

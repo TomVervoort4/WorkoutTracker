@@ -6,7 +6,7 @@
  * and init(). All tab renders and event handlers follow in Part 2.
  */
 
-import { get, put, del, getAll, putMany, clear } from './db.js';
+import { get, put, del, getAll, getAllKeys, putMany, clear } from './db.js';
 import { renderInsightsTab, checkForNewPB } from './insights.js';
 import {
   importFitdaysFile,
@@ -1183,10 +1183,10 @@ function handleDurationTimerClick(btn, date) {
   }
 }
 
-function showDialog(message, onConfirm) {
+function showDialog(message, onConfirm, { confirmLabel = 'Confirm', danger = true } = {}) {
   const confirmBtn = document.getElementById('dialog-confirm-btn');
-  confirmBtn.textContent = 'Confirm';
-  confirmBtn.className   = 'btn-danger';
+  confirmBtn.textContent = confirmLabel;
+  confirmBtn.className   = danger ? 'btn-danger' : 'btn-primary';
   document.getElementById('dialog-inputs').hidden = true;
   document.getElementById('dialog-message').textContent = message;
   state.ui._dialogConfirmCallback = onConfirm;
@@ -2757,55 +2757,145 @@ async function renderStorageStatus() {
   }
 }
 
-async function handleExport() {
-  try {
-    const [planDoc, allLogs, allBw, allMeta, allBodyComp] = await Promise.all([
-      get('plan', PLAN_DOC_ID),
-      getAll('logs'),
-      getAll('bodyweight'),
-      getAll('meta'),
-      getAll('bodyComposition'),
-    ]);
+/**
+ * Serialises the whole app into the portable snapshot the roadmap treats as the
+ * real source of truth. IndexedDB is only a cache of this — a wiped app can be
+ * rebuilt whole from a snapshot alone (see the restore path and PHASE1 test).
+ * Same format the download and Web Share paths both emit.
+ */
+async function buildBackupPayload() {
+  const [planDoc, allLogs, allBw, allMeta, allBodyComp] = await Promise.all([
+    get('plan', PLAN_DOC_ID),
+    getAll('logs'),
+    getAll('bodyweight'),
+    getAll('meta'),
+    getAll('bodyComposition'),
+  ]);
 
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      version:    2,
-      plan:       planDoc,
-      logs:       allLogs,
-      bodyweight: allBw,
-      meta:       allMeta,
-      // Raw Fitdays readings exactly as imported — no daily collapse, no
-      // derived series, no session pairing. The analysis layer derives what it
-      // needs from these; raw is the source of truth.
-      bodyComposition: allBodyComp,
-    };
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a   = Object.assign(document.createElement('a'), {
-      href:     url,
-      download: `fittrack-${todayStr()}.json`,
-    });
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast('Data exported.');
-  } catch (err) {
-    console.error('[FitTrack] Export failed:', err);
-    showToast('Export failed — see console.');
-  }
+  return {
+    exportedAt: new Date().toISOString(),
+    version:    2,
+    plan:       planDoc,
+    logs:       allLogs,
+    bodyweight: allBw,
+    meta:       allMeta,
+    // Raw Fitdays readings exactly as imported — no daily collapse, no
+    // derived series, no session pairing. The analysis layer derives what it
+    // needs from these; raw is the source of truth.
+    bodyComposition: allBodyComp,
+  };
 }
 
+/**
+ * Back the data up off-device. On a phone that can share files, this hands the
+ * JSON snapshot to the system share sheet, where "Save to Drive" is one tap away
+ * — giving the data a durable home outside wipeable browser storage. Everywhere
+ * the file-share API is absent (most desktops) it falls back to a plain file
+ * download. This share hand-off is the app's ONLY network interaction: no Drive
+ * API, no OAuth, no credentials — the OS moves the file, not us.
+ */
+async function handleExport() {
+  let file;
+  try {
+    const payload = await buildBackupPayload();
+    const json    = JSON.stringify(payload, null, 2);
+    file = new File([json], `fittrack-${todayStr()}.json`, {
+      type: 'application/json',
+    });
+  } catch (err) {
+    console.error('[FitTrack] Backup serialisation failed:', err);
+    showToast('Backup failed — see console.');
+    return;
+  }
+
+  // Feature-detect with the real file: navigator.share alone doesn't imply the
+  // platform can share *files*, so canShare({ files }) must be checked first.
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({
+        files: [file],
+        title: 'FitTrack backup',
+        text:  'FitTrack data backup',
+      });
+      showToast('Backup ready — save it to Drive.');
+    } catch (err) {
+      // Dismissing the share sheet is a choice, not a failure — stay silent.
+      if (err?.name !== 'AbortError') {
+        console.error('[FitTrack] Share failed, falling back to download:', err);
+        downloadBackupFile(file);
+      }
+    }
+    return;
+  }
+
+  // No file-sharing support on this platform — download to device instead.
+  downloadBackupFile(file);
+}
+
+/** Save the snapshot as a file download — the fallback when sharing is absent. */
+function downloadBackupFile(file) {
+  const url = URL.createObjectURL(file);
+  const a   = Object.assign(document.createElement('a'), {
+    href:     url,
+    download: file.name,
+  });
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast('Backup downloaded.');
+}
+
+/** Records from `list` whose `keyField` value isn't already in `have`. */
+function dedupeNew(list, keyField, have) {
+  const seen  = new Set();
+  const fresh = [];
+  for (const rec of list) {
+    const k = rec?.[keyField];
+    if (k == null || have.has(k) || seen.has(k)) continue;
+    seen.add(k);
+    fresh.push(rec);
+  }
+  return fresh;
+}
+
+/** Plain-language outcome for a restore, matching the Fitdays import voice. */
+function restoreSummaryMessage({ sessions, readings, present }) {
+  const parts = [];
+  if (sessions > 0) parts.push(`${sessions} new session${sessions === 1 ? '' : 's'}`);
+  if (readings > 0) parts.push(`${readings} new body-composition reading${readings === 1 ? '' : 's'}`);
+
+  if (!parts.length) {
+    return present > 0
+      ? `Already up to date — all ${present} record${present === 1 ? '' : 's'} were already present.`
+      : 'Nothing to restore from that backup.';
+  }
+
+  let msg = `Restored ${parts.join(' and ')}.`;
+  if (present > 0) msg += ` ${present} record${present === 1 ? '' : 's'} already present.`;
+  return msg;
+}
+
+/**
+ * Restore from a snapshot by MERGING it into what's already here — never wiping
+ * first. Training sessions and body-composition readings are append-only and
+ * keyed deterministically (log id / reading datetime), so a record already
+ * present is left untouched: restoring an OLDER snapshot can't delete newer
+ * local data, and restoring a NEWER one can't create duplicates — the same
+ * dedupe-on-key idiom the Fitdays import uses.
+ *
+ * Plan and settings are current config, not accumulating history, so they're
+ * restored (overwritten) from the snapshot. That overwrite is exactly what lets
+ * a wiped app — where startup has just seeded a default plan — come back whole
+ * from a snapshot alone.
+ */
 async function handleImport(event) {
   const file = event.target.files?.[0];
   event.target.value = ''; // reset immediately so the same file can be re-selected
   if (!file) return;
 
   showDialog(
-    `Import "${file.name}"? This will overwrite ALL current data and cannot be undone.`,
+    `Restore from "${file.name}"? New sessions and readings are added to what you already have — nothing is deleted. Your plan and settings are restored from the file.`,
     async () => {
       try {
         const text    = await file.text();
@@ -2815,22 +2905,25 @@ async function handleImport(event) {
           throw new Error('Unrecognised FitTrack backup format.');
         }
 
-        await Promise.all([
-          clear('plan'),
-          clear('logs'),
-          clear('bodyweight'),
-          clear('meta'),
-          clear('bodyComposition'),
+        // Keys already in each append-only store — anything present is kept as-is.
+        const [logKeys, bcKeys, bwKeys] = await Promise.all([
+          getAllKeys('logs'),
+          getAllKeys('bodyComposition'),
+          getAllKeys('bodyweight'),
         ]);
+        const freshLogs = dedupeNew(payload.logs            ?? [], 'id',       new Set(logKeys));
+        const freshBc   = dedupeNew(payload.bodyComposition ?? [], 'datetime', new Set(bcKeys));
+        const freshBw   = dedupeNew(payload.bodyweight      ?? [], 'date',     new Set(bwKeys));
 
-        // `bodyComposition` is absent from v1 backups — restoring one simply
-        // leaves the store empty rather than failing.
+        // Plan + settings: restore (overwrite). Records: write only the new ones.
+        // `bodyComposition`/`meta` are absent from v1 backups — those simply
+        // contribute nothing rather than failing.
         await Promise.all([
           put('plan', payload.plan),
-          ...payload.logs.map(l         => put('logs',       l)),
-          ...(payload.bodyweight      ?? []).map(b => put('bodyweight',      b)),
-          ...(payload.meta            ?? []).map(m => put('meta',            m)),
-          ...(payload.bodyComposition ?? []).map(r => put('bodyComposition', r)),
+          ...(payload.meta ?? []).map(m => put('meta', m)),
+          putMany('logs', freshLogs),
+          putMany('bodyComposition', freshBc),
+          putMany('bodyweight', freshBw),
         ]);
 
         await loadState();
@@ -2839,12 +2932,24 @@ async function handleImport(event) {
         await migrateInclineDbLabel();
         state.ui.viewedDate = state.ui.today;
         render();
-        showToast('Data imported successfully.');
+
+        // "sessions" counts distinct new training days; the dedupe is per-set,
+        // so this is the human-readable unit, never an overcount.
+        const present =
+          ((payload.logs?.length            ?? 0) - freshLogs.length) +
+          ((payload.bodyComposition?.length ?? 0) - freshBc.length)  +
+          ((payload.bodyweight?.length      ?? 0) - freshBw.length);
+        showToast(restoreSummaryMessage({
+          sessions: new Set(freshLogs.map(l => l.date)).size,
+          readings: freshBc.length,
+          present,
+        }), 4000);
       } catch (err) {
-        console.error('[FitTrack] Import failed:', err);
-        showToast(`Import failed: ${err.message}`);
+        console.error('[FitTrack] Restore failed:', err);
+        showToast(`Restore failed: ${err.message}`);
       }
-    }
+    },
+    { confirmLabel: 'Restore', danger: false }
   );
 }
 

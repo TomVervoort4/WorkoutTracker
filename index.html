@@ -274,30 +274,30 @@
       </div>
 
       <div class="card data-card">
-        <p class="data-card-title">Export all data</p>
-        <p class="data-card-desc">Download a JSON backup of all your workouts, bodyweight logs, and settings.</p>
+        <p class="data-card-title">Back up your data</p>
+        <p class="data-card-desc">Save a full JSON snapshot off-device. On your phone this opens the share sheet — choose Save to Drive. On desktop it downloads a file.</p>
         <button class="btn-secondary" id="export-btn">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/>
-            <line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          Export JSON
-        </button>
-      </div>
-
-      <div class="card data-card">
-        <p class="data-card-title">Import data</p>
-        <p class="data-card-desc">Restore from a previously exported JSON backup. This will overwrite all current data.</p>
-        <label class="btn-secondary import-label" for="import-file-input">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
             <polyline points="17 8 12 3 7 8"/>
             <line x1="12" y1="3" x2="12" y2="15"/>
           </svg>
-          Import JSON
+          Back up
+        </button>
+      </div>
+
+      <div class="card data-card">
+        <p class="data-card-title">Restore from backup</p>
+        <p class="data-card-desc">Merge a saved backup back in. New sessions and readings are added to what you have — nothing is deleted; your plan and settings are restored from the file.</p>
+        <label class="btn-secondary import-label" for="import-file-input">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Restore
         </label>
-        <input type="file" id="import-file-input" accept=".json" style="display:none" aria-label="Import JSON backup" />
+        <input type="file" id="import-file-input" accept=".json" style="display:none" aria-label="Restore from JSON backup" />
       </div>
 
       <div class="card data-card" id="orphan-review-card" hidden>
