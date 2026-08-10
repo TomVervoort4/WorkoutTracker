@@ -21,7 +21,7 @@ import {
 
 // Bumped in lockstep with the service-worker cache version; shown in the Data
 // tab's sharing diagnostics so a screenshot self-identifies which build is live.
-const BUILD_ID = 'v12';
+const BUILD_ID = 'v14';
 
 const DAY_NAMES_LONG  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const DAY_NAMES_SHORT = ['M','T','W','T','F','S','S'];
@@ -1022,6 +1022,11 @@ async function init() {
   document.getElementById('import-file-input').addEventListener('change', handleImport);
   document.getElementById('clear-data-btn').addEventListener('click', handleClearData);
   document.getElementById('review-orphans-btn').addEventListener('click', () => openOrphanReview());
+
+  // 8a. Web Share diagnostic tests (troubleshooting only)
+  document.getElementById('share-test-text').addEventListener('click', () => runShareTest('text'));
+  document.getElementById('share-test-fileonly').addEventListener('click', () => runShareTest('fileonly'));
+  document.getElementById('share-test-filetext').addEventListener('click', () => runShareTest('filetext'));
 
   // 8b. Orphan-review overlay controls
   document.getElementById('orphan-review-later-btn').addEventListener('click', closeOrphanReview);
@@ -2840,6 +2845,9 @@ function renderShareDiagnostics() {
     `canShare .txt    : ${probe('fittrack.txt')}`,
     `prepared file    : ${prepared}`,
     `last backup      : ${state.ui.lastShareOutcome ?? '— (not tried yet)'}`,
+    `test text        : ${state.ui.shareTests?.text     ?? '—'}`,
+    `test file only   : ${state.ui.shareTests?.fileonly ?? '—'}`,
+    `test file + text : ${state.ui.shareTests?.filetext ?? '—'}`,
     `user agent       : ${navigator.userAgent}`,
   ].join('\n');
 }
@@ -2884,6 +2892,34 @@ async function prepareBackupSnapshot() {
  * throws NotAllowedError. All the async work already happened in
  * `prepareBackupSnapshot`; here we only touch the in-memory `preparedBackup`.
  */
+/**
+ * Diagnostic-only: run one variant of navigator.share() straight from a real
+ * button tap and record what it does. Isolates whether Web Share is blocked
+ * outright (all variants throw "Permission denied") or only for files.
+ */
+function runShareTest(kind) {
+  state.ui.shareTests = state.ui.shareTests || {};
+  const act = navigator.userActivation ? `active=${navigator.userActivation.isActive}` : 'active=n/a';
+  const set = (msg) => { state.ui.shareTests[kind] = `${msg} (${act})`; renderShareDiagnostics(); };
+
+  if (!navigator.share) { set('no navigator.share'); return; }
+
+  let data;
+  if (kind === 'text') {
+    data = { title: 'FitTrack test', text: 'FitTrack share test' };
+  } else {
+    const file = preparedBackup?.file;
+    if (!file) { set('no prepared file — open Data tab first'); return; }
+    data = kind === 'fileonly'
+      ? { files: [file] }
+      : { files: [file], title: 'FitTrack backup', text: 'FitTrack data backup' };
+  }
+
+  navigator.share(data)
+    .then(() => set('OK'))
+    .catch(err => set(`${err?.name || 'Error'}: ${err?.message || err}`));
+}
+
 function handleExport() {
   const snap = preparedBackup;
 
@@ -2910,12 +2946,10 @@ function handleExport() {
     : 'active=n/a';
 
   if (file) {
-    // Absolute minimum before share(): read a var, capture activation, call.
-    navigator.share({
-      files: [file],
-      title: 'FitTrack backup',
-      text:  'FitTrack data backup',
-    })
+    // Share the file ONLY — no title/text. Some Android share targets reject a
+    // files payload that also carries title/text with NotAllowedError even when
+    // canShare() said yes, so we send the leanest possible payload.
+    navigator.share({ files: [file] })
       .then(() => {
         state.ui.lastShareOutcome = `shared OK as ${file.name} (${act})`;
         showToast('Backup ready — save it to Drive.');

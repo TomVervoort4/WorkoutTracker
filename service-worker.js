@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v12";
+const CACHE_VERSION = "v14";
 const CACHE_NAME = `fittrack-${CACHE_VERSION}`;
 
 const APP_SHELL = [
