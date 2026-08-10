@@ -6,7 +6,7 @@
  * and init(). All tab renders and event handlers follow in Part 2.
  */
 
-import { get, put, del, getAll, clear } from './db.js';
+import { get, put, del, getAll, putMany, clear } from './db.js';
 import { renderInsightsTab, checkForNewPB } from './insights.js';
 import {
   importFitdaysFile,
@@ -34,8 +34,31 @@ const FINISHED_KEY         = 'finishedSessions';
 const RETIRED_META_KEYS = ['streak', 'bwPromptDate'];
 
 // Shown for any exercise record whose name is missing or was never
-// migrated off its internal id (see migrateUnnamedExercises()).
+// migrated off its internal id (see the orphan-review flow below).
 const UNNAMED_EXERCISE_PLACEHOLDER = 'Unnamed exercise';
+
+// Durable name/unit registry for exercise ids that appear in the logs but have
+// no definition anywhere else (the historical `added_*` / `swap_*` orphans).
+// Stored as one meta doc { key, value: { <id>: { id, name, unit, archived } } }
+// so it round-trips through the JSON export like every other meta record, and
+// so name resolution has a single source of truth to fall back on.
+const EXERCISE_REGISTRY_KEY = 'exerciseRegistry';
+
+// Set once the user has been through the one-time "Name your exercises" review
+// so it does not auto-surface on every load. The review is still reachable on
+// demand from the Data tab, and the backfill itself is idempotent.
+const ORPHAN_REVIEW_DONE_KEY = 'orphanReviewCompleted';
+
+// Orphan ids the brief flags as recurring, actively-progressed exercises.
+// These — plus any orphan logged on ORPHAN_RECURRING_DATES+ distinct dates —
+// are never pre-selected for archive and are surfaced as "recurring — likely
+// keep" in the review screen. They must never be auto-archived or removed.
+const PROTECTED_ORPHAN_IDS = [
+  'added_mrdx5pc1_tf8b4',
+  'added_ms6a8n2j_s2j0n',
+  'added_mslqbhjr_g271t',
+];
+const ORPHAN_RECURRING_DATES = 3;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  DATE UTILITIES
@@ -187,7 +210,11 @@ const SEED_IDS = {
   overheadPress:        'ex_seed_ohp',
   barbellRow:           'ex_seed_bb_row',
   weightedPullup:       'ex_seed_pullup',
-  inclineDbPress:       'ex_seed_incline_db',
+  // Id kept as the original 'ex_seed_incline_db' string on purpose: this slot
+  // has long since become a Biceps Curl, but every logged set is keyed to the
+  // old id forever, so renaming the id would orphan that history. Only the
+  // human-facing name/muscles/cue below are honest about what it is now.
+  bicepsCurl:           'ex_seed_incline_db',
   tricepPushdown:       'ex_seed_tri_pushdown',
   // Wednesday — Upper Moderate
   dbBenchPress:         'ex_seed_db_bench',
@@ -255,12 +282,12 @@ function buildDefaultPlan() {
             archived: false,
           },
           {
-            id: SEED_IDS.inclineDbPress,
-            name: 'Incline DB Press',
+            id: SEED_IDS.bicepsCurl,
+            name: 'Biceps Curl',
             sets: 3,
-            reps: '8',
-            muscles: 'Upper Chest · Front Delt',
-            cue: 'Bench at 30°, elbows at 75°, full stretch at bottom, squeeze at top.',
+            reps: '10',
+            muscles: 'Biceps · Brachialis',
+            cue: 'Supinate wrist at the top, full stretch at bottom, no torso swing.',
             archived: false,
           },
           {
@@ -535,35 +562,230 @@ async function migrateExerciseUnits() {
 }
 
 /**
- * One-time repair for swap/added exercise extras stored before the naming
- * bug was fixed: any extra whose `name` is blank or still equal to its
- * internal `id` gets a chance to be renamed, or falls back to a readable
- * placeholder. Self-limiting — once repaired, records no longer match the
- * broken condition, so this is a no-op on subsequent app loads.
+ * Corrects the stale `ex_seed_incline_db` slot, which is used everywhere as a
+ * Biceps Curl now. The id is deliberately left untouched — renaming it would
+ * orphan every logged set keyed to the old string — so only the human-facing
+ * name/muscles/cue are fixed if they still say "incline". Never touches logs.
+ * No-op once corrected.
  */
-async function migrateUnnamedExercises() {
-  for (const key in state.meta) {
-    if (!key.startsWith('swaps_')) continue;
-    const doc = state.meta[key];
-    const extras = doc?.value ?? [];
-    let dirty = false;
-
-    for (const extra of extras) {
-      const isUnnamed = !extra.name?.trim() || extra.name === extra.id;
-      if (!isUnnamed) continue;
-
-      const renamed = window.prompt(
-        `An exercise is missing its name. Enter a name for it now (or leave blank to label it "${UNNAMED_EXERCISE_PLACEHOLDER}"):`
-      );
-      extra.name = renamed?.trim() || UNNAMED_EXERCISE_PLACEHOLDER;
+async function migrateInclineDbLabel() {
+  const STALE_ID = 'ex_seed_incline_db';
+  let dirty = false;
+  for (const day of state.plan?.days ?? []) {
+    const ex = (day.exercises ?? []).find(e => e.id === STALE_ID);
+    if (!ex) continue;
+    if (/incline/i.test(ex.name ?? '') || /incline/i.test(ex.cue ?? '')) {
+      ex.name    = 'Biceps Curl';
+      ex.muscles = 'Biceps · Brachialis';
+      ex.cue     = 'Supinate wrist at the top, full stretch at bottom, no torso swing.';
       dirty = true;
     }
+  }
+  if (dirty) await put('plan', state.plan);
+}
 
-    if (dirty) {
-      await put('meta', doc);
-      state.meta[key] = doc;
+// ─────────────────────────────────────────────────────────────────────────────
+//  ORPHAN EXERCISE DETECTION + BACKFILL
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Every exerciseId that appears anywhere in the logs (flat + defensive nested). */
+function collectLoggedExerciseIds() {
+  const ids = new Set();
+  for (const log of state.logs) {
+    if (log?.exerciseId) ids.add(log.exerciseId);
+    // Defensive: older "retroactive" session records nested sets under an
+    // `exercises` array rather than one flat record per set.
+    if (Array.isArray(log?.exercises)) {
+      for (const e of log.exercises) {
+        const id = e?.exerciseId ?? e?.id;
+        if (id) ids.add(id);
+      }
     }
   }
+  return [...ids];
+}
+
+/**
+ * Logged exercise ids that cannot be resolved to a real name from any source
+ * (plan, session extras, registry, substituteName, or a stamped log name).
+ * These are the anonymous `added_*` / `swap_*` orphans surfaced for naming.
+ */
+function findOrphanExerciseIds() {
+  return collectLoggedExerciseIds()
+    .filter(id => getExerciseName(id) === UNNAMED_EXERCISE_PLACEHOLDER);
+}
+
+/** Distinct dates on which an id has a meaningful (valued) logged set. */
+function orphanLoggedDates(id) {
+  const dates = new Set();
+  for (const l of state.logs) {
+    if (l.exerciseId === id && (l.weight != null || l.reps != null)) dates.add(l.date);
+  }
+  return [...dates].sort();
+}
+
+/**
+ * A protected orphan is never pre-selected for archive: the brief's named
+ * recurring ids, plus anything logged on ORPHAN_RECURRING_DATES+ distinct
+ * dates (a pattern that only real, progressed exercises produce).
+ */
+function isProtectedOrphan(id) {
+  if (PROTECTED_ORPHAN_IDS.includes(id)) return true;
+  return orphanLoggedDates(id).length >= ORPHAN_RECURRING_DATES;
+}
+
+/** Identifying hints for the review screen: per-date weight×reps and totals. */
+function orphanHints(id) {
+  const byDate = {};
+  for (const l of state.logs) {
+    if (l.exerciseId !== id) continue;
+    if (l.weight == null && l.reps == null) continue;
+    (byDate[l.date] ??= []).push(l);
+  }
+  const dates = Object.keys(byDate).sort();
+  const perDate = dates.map(date => {
+    const sets = byDate[date]
+      .sort((a, b) => a.setIndex - b.setIndex)
+      .map(l => {
+        const w = l.weight != null ? `${l.weight}kg` : '';
+        const r = l.reps != null ? (w ? `×${l.reps}` : String(l.reps)) : '';
+        return (w + r) || '—';
+      });
+    return { date, sets };
+  });
+  return { dates, sessionCount: dates.length, perDate };
+}
+
+/**
+ * Backfills a resolved name/unit for an orphan id: writes it to the durable
+ * registry and stamps `exerciseName`/`unit` onto every existing logged set for
+ * that id so history and future exports resolve. Never deletes anything.
+ */
+async function backfillOrphanName(id, name, unit, archived = false) {
+  await upsertRegistryEntry(id, { name, unit, archived });
+
+  const affected = state.logs.filter(l => l.exerciseId === id);
+  for (const log of affected) {
+    log.exerciseName = name;
+    log.unit = unit;
+  }
+  await putMany('logs', affected);
+}
+
+/** Marks the one-time orphan review as seen so it stops auto-surfacing. */
+async function markOrphanReviewDone() {
+  const doc = { key: ORPHAN_REVIEW_DONE_KEY, value: true };
+  await put('meta', doc);
+  state.meta[ORPHAN_REVIEW_DONE_KEY] = doc;
+}
+
+/** One review row: id, memory-jogging hints, and name / unit / archive controls. */
+function buildOrphanRowHTML(id) {
+  const { sessionCount, perDate } = orphanHints(id);
+  const protectedFlag = isProtectedOrphan(id);
+
+  const hintLines = perDate.map(d => `
+    <div class="orphan-hint-line">
+      <span class="orphan-hint-date">${escHtml(friendlyDateLabel(d.date))}</span>
+      <span class="orphan-hint-sets">${escHtml(d.sets.join(', '))}</span>
+    </div>`).join('');
+
+  return `
+    <div class="orphan-row" data-orphan-id="${escHtml(id)}">
+      <div class="orphan-row-head">
+        <code class="orphan-row-id">${escHtml(id)}</code>
+        ${protectedFlag ? '<span class="orphan-recurring-badge">recurring — likely keep</span>' : ''}
+      </div>
+      <div class="orphan-hints">
+        <p class="orphan-hint-summary">${sessionCount} session${sessionCount === 1 ? '' : 's'} logged</p>
+        ${hintLines}
+      </div>
+      <div class="orphan-row-fields">
+        <input class="orphan-name-input" type="text"
+               placeholder="Real exercise name"
+               aria-label="Name for ${escHtml(id)}" />
+        <select class="orphan-unit-select" aria-label="Unit for ${escHtml(id)}">
+          <option value="reps" selected>Reps</option>
+          <option value="seconds">Seconds</option>
+        </select>
+        <label class="orphan-archive">
+          <input type="checkbox" class="orphan-archive-check" />
+          Archive
+        </label>
+      </div>
+    </div>`;
+}
+
+/** Opens the "Name your exercises" review overlay for all current orphans. */
+function openOrphanReview() {
+  const orphans = findOrphanExerciseIds();
+  const overlay = document.getElementById('orphan-review-overlay');
+  const list    = document.getElementById('orphan-review-list');
+
+  if (!orphans.length) {
+    showToast('No unnamed exercises to review.');
+    return;
+  }
+
+  // Protected/recurring first, then by most sessions — the meaningful ones lead.
+  orphans.sort((a, b) => {
+    const pa = isProtectedOrphan(a), pb = isProtectedOrphan(b);
+    if (pa !== pb) return pa ? -1 : 1;
+    return orphanLoggedDates(b).length - orphanLoggedDates(a).length;
+  });
+
+  list.innerHTML = orphans.map(buildOrphanRowHTML).join('');
+
+  // Archiving disables the name field for that row (archive keeps logs, no name needed)
+  list.querySelectorAll('.orphan-row').forEach(row => {
+    const check = row.querySelector('.orphan-archive-check');
+    const name  = row.querySelector('.orphan-name-input');
+    check.addEventListener('change', () => {
+      name.disabled = check.checked;
+      row.classList.toggle('orphan-row-archived', check.checked);
+    });
+  });
+
+  overlay.hidden = false;
+}
+
+function closeOrphanReview() {
+  document.getElementById('orphan-review-overlay').hidden = true;
+}
+
+/**
+ * Applies the review: each row is named (and its logs backfilled) or archived.
+ * Rows left blank are skipped and remain orphans for a later pass. Nothing is
+ * ever hard-deleted. Marks the one-time review as seen when done.
+ */
+async function saveOrphanReview() {
+  const rows = document.querySelectorAll('#orphan-review-list .orphan-row');
+  let named = 0, archived = 0;
+
+  for (const row of rows) {
+    const id      = row.dataset.orphanId;
+    const name    = row.querySelector('.orphan-name-input').value.trim();
+    const unit    = row.querySelector('.orphan-unit-select').value === 'seconds' ? 'seconds' : 'reps';
+    const doArchive = row.querySelector('.orphan-archive-check').checked;
+
+    if (doArchive) {
+      await backfillOrphanName(id, name || 'Archived exercise', unit, true);
+      archived++;
+    } else if (name) {
+      await backfillOrphanName(id, name, unit, false);
+      named++;
+    }
+    // else: left blank — untouched, still an orphan for next time.
+  }
+
+  await markOrphanReviewDone();
+  closeOrphanReview();
+  render();
+
+  const parts = [];
+  if (named)    parts.push(`${named} named`);
+  if (archived) parts.push(`${archived} archived`);
+  showToast(parts.length ? `Saved — ${parts.join(', ')}.` : 'No changes made.');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -753,13 +975,12 @@ async function init() {
   // 3. Write defaults to the DB on the very first launch
   await seedIfFirstRun();
 
-  // 3b. One-time repair for any pre-existing unnamed swap/added exercises
-  await migrateUnnamedExercises();
-
-  // 3c. Drop retired streak / Monday-prompt meta, ensure every exercise
-  //     definition has a unit ('reps' | 'seconds')
+  // 3b. Drop retired streak / Monday-prompt meta, ensure every exercise
+  //     definition has a unit ('reps' | 'seconds'), and correct the stale
+  //     incline-DB label (id preserved, only the name/cue fixed).
   await dropRetiredMeta();
   await migrateExerciseUnits();
+  await migrateInclineDbLabel();
 
   // 4. Bottom tab navigation
   document.querySelectorAll('.nav-tab').forEach(btn => {
@@ -796,6 +1017,11 @@ async function init() {
   document.getElementById('export-btn').addEventListener('click', handleExport);
   document.getElementById('import-file-input').addEventListener('change', handleImport);
   document.getElementById('clear-data-btn').addEventListener('click', handleClearData);
+  document.getElementById('review-orphans-btn').addEventListener('click', () => openOrphanReview());
+
+  // 8b. Orphan-review overlay controls
+  document.getElementById('orphan-review-later-btn').addEventListener('click', closeOrphanReview);
+  document.getElementById('orphan-review-save-btn').addEventListener('click', saveOrphanReview);
 
   // 9. Confirm dialog buttons
   document.getElementById('dialog-cancel-btn').addEventListener('click', closeDialog);
@@ -808,6 +1034,12 @@ async function init() {
 
   // 10. First paint
   render();
+
+  // 11. Surface any anonymous historical exercise ids for naming — once, unless
+  //     re-opened manually from the Data tab. Deferred so it never blocks paint.
+  if (!state.meta[ORPHAN_REVIEW_DONE_KEY] && findOrphanExerciseIds().length > 0) {
+    setTimeout(() => openOrphanReview(), 400);
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);
@@ -1042,6 +1274,12 @@ function getExistingLog(date, exerciseId, setIndex) {
 async function writeLog(date, exerciseId, setIndex, fields) {
   const id       = getLogId(date, exerciseId, setIndex);
   const existing = getExistingLog(date, exerciseId, setIndex);
+
+  // Stamp the resolved name and unit onto the set itself so the export is
+  // self-describing. This is the durable fix for the anonymous-id bug: even if
+  // the session-scoped `swaps_<date>` definition is ever lost, the name still
+  // lives on every set logged against the exercise. Purely additive fields.
+  const resolvedName = getExerciseName(exerciseId);
   const entry    = {
     id,
     date,
@@ -1052,6 +1290,10 @@ async function writeLog(date, exerciseId, setIndex, fields) {
     done:           fields.done           ?? existing?.done           ?? false,
     notes:          fields.notes          ?? existing?.notes          ?? '',
     substituteName: fields.substituteName ?? existing?.substituteName ?? null,
+    exerciseName:   resolvedName !== UNNAMED_EXERCISE_PLACEHOLDER
+                      ? resolvedName
+                      : (existing?.exerciseName ?? null),
+    unit:           getExerciseUnit(exerciseId),
   };
   await put('logs', entry);
   const idx = state.logs.findIndex(l => l.id === id);
@@ -1163,7 +1405,23 @@ function getExerciseDef(exerciseId) {
     const extra = state.meta[key]?.value?.find(e => e.id === exerciseId);
     if (extra) return extra;
   }
+  // Backfilled orphans — named through the review screen, kept in the registry.
+  const reg = getRegistry()[exerciseId];
+  if (reg?.name) return reg;
   return null;
+}
+
+/** The exercise-name registry map ({ id: {id,name,unit,archived} }), or {}. */
+function getRegistry() {
+  return state.meta[EXERCISE_REGISTRY_KEY]?.value ?? {};
+}
+
+/** Insert/merge a registry entry for an id and persist it. */
+async function upsertRegistryEntry(id, entry) {
+  const doc = state.meta[EXERCISE_REGISTRY_KEY] ?? { key: EXERCISE_REGISTRY_KEY, value: {} };
+  doc.value[id] = { id, ...doc.value[id], ...entry };
+  await put('meta', doc);
+  state.meta[EXERCISE_REGISTRY_KEY] = doc;
 }
 
 /** 'reps' | 'seconds' for an exercise id; unknown ids default to 'reps'. */
@@ -1178,19 +1436,16 @@ function formatEffort(value, unit) {
 }
 
 function getExerciseName(exerciseId) {
-  if (state.plan) {
-    for (const day of state.plan.days) {
-      const ex = day.exercises?.find(e => e.id === exerciseId);
-      if (ex?.name) return ex.name;
-    }
-  }
-  for (const key in state.meta) {
-    if (!key.startsWith('swaps_')) continue;
-    const extra = state.meta[key]?.value?.find(e => e.id === exerciseId);
-    if (extra?.name) return extra.name;
-  }
+  const def = getExerciseDef(exerciseId);
+  if (def?.name?.trim()) return def.name;
+
+  // Legacy swap logs carried the substitute's name on the set record itself.
   const swapLog = state.logs.find(l => l.exerciseId === exerciseId && l.substituteName);
   if (swapLog?.substituteName) return swapLog.substituteName;
+
+  // Newer logs self-describe: the name is stamped on the set at write time.
+  const named = state.logs.find(l => l.exerciseId === exerciseId && l.exerciseName);
+  if (named?.exerciseName) return named.exerciseName;
 
   return UNNAMED_EXERCISE_PLACEHOLDER;
 }
@@ -1378,11 +1633,6 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
 
   const actionsRow = readOnly ? '' : `
         <div class="exercise-actions-row">
-          <button class="btn-ghost swap-btn"
-                  data-ex-id="${escHtml(ex.id)}"
-                  data-ex-name="${escHtml(ex.name)}">
-            ⇄ Can't do this? Swap it
-          </button>
           <button class="btn-ghost remove-ex-btn"
                   data-ex-id="${escHtml(ex.id)}"
                   data-ex-name="${escHtml(ex.name)}">
@@ -1390,7 +1640,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
           </button>
         </div>`;
 
-  return `
+  const cardHTML = `
     <div class="card exercise-card${complete ? ' exercise-complete' : ''}"
          data-exercise-id="${escHtml(ex.id)}">
       <button class="exercise-header" aria-expanded="${expanded}">
@@ -1431,6 +1681,32 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
         </div>
         ${actionsRow}
       </div>
+    </div>`;
+
+  // Read-only (future) dates aren't editable, so they aren't swipeable either.
+  if (readOnly) return cardHTML;
+
+  // Swipe-to-delete: the card sits above a delete action revealed by a
+  // left-swipe. The same delete is also reachable via the in-card button and
+  // the plan editor, so the gesture is never the only way to remove.
+  return `
+    <div class="exercise-swipe" data-exercise-id="${escHtml(ex.id)}">
+      <div class="exercise-swipe-action" aria-hidden="true">
+        <button class="swipe-delete-btn"
+                tabindex="-1"
+                aria-label="Delete ${escHtml(ex.name)} from this session"
+                data-ex-id="${escHtml(ex.id)}"
+                data-ex-name="${escHtml(ex.name)}">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+          </svg>
+          <span>Delete</span>
+        </button>
+      </div>
+      ${cardHTML}
     </div>`;
 }
 
@@ -1532,19 +1808,73 @@ function wireExerciseCards(exercises, date) {
     });
   });
 
-  // Mid-workout swap buttons
-  stack.querySelectorAll('.swap-btn').forEach(btn => {
-    btn.addEventListener('click', () =>
-      promptMidWorkoutSwap(btn.dataset.exId, btn.dataset.exName, date)
-    );
-  });
-
-  // Remove-from-session buttons
-  stack.querySelectorAll('.remove-ex-btn').forEach(btn => {
+  // Remove-from-session buttons (non-swipe control) and swipe delete actions
+  stack.querySelectorAll('.remove-ex-btn, .swipe-delete-btn').forEach(btn => {
     btn.addEventListener('click', () =>
       handleRemoveExercise(btn.dataset.exId, btn.dataset.exName, date)
     );
   });
+
+  // Left-swipe reveal on each card
+  stack.querySelectorAll('.exercise-swipe').forEach(wireSwipeToDelete);
+}
+
+/**
+ * Wires a single card's left-swipe reveal. Pointer Events cover both touch and
+ * mouse. Only a clearly horizontal drag past the reveal width opens the delete
+ * action; a mostly-vertical drag scrolls the page, and a plain tap still falls
+ * through to the accordion. A swipe that opened suppresses the trailing click.
+ */
+function wireSwipeToDelete(wrap) {
+  const card       = wrap.querySelector('.exercise-card');
+  const REVEAL     = 88;   // px — width of the delete action
+  const AXIS_LOCK  = 10;   // px moved before we commit to an axis
+  let startX = 0, startY = 0, dragging = false, axis = null, base = 0, swiped = false;
+
+  const setX = x => { card.style.transform = `translateX(${x}px)`; };
+  const openCard  = () => { setX(-REVEAL); wrap.classList.add('swipe-open'); };
+  const closeCard = () => { setX(0); wrap.classList.remove('swipe-open'); };
+
+  card.addEventListener('pointerdown', e => {
+    if (e.target.closest('input, select, textarea')) return; // let fields work
+    startX = e.clientX; startY = e.clientY;
+    base = wrap.classList.contains('swipe-open') ? -REVEAL : 0;
+    dragging = true; axis = null; swiped = false;
+    card.style.transition = 'none';
+  });
+
+  card.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (axis === null) {
+      if (Math.abs(dx) < AXIS_LOCK && Math.abs(dy) < AXIS_LOCK) return;
+      axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+      if (axis === 'x') { try { card.setPointerCapture(e.pointerId); } catch {} }
+    }
+    if (axis !== 'x') return;         // vertical → leave scrolling alone
+    e.preventDefault();
+    const next = Math.max(-REVEAL, Math.min(0, base + dx));
+    setX(next);
+    if (Math.abs(next) > 4) swiped = true;
+  });
+
+  const finish = () => {
+    if (!dragging) return;
+    dragging = false;
+    card.style.transition = '';
+    if (axis === 'x') {
+      const open = (parseFloat(card.style.transform.replace(/[^-\d.]/g, '')) || 0) <= -REVEAL / 2;
+      open ? openCard() : closeCard();
+    }
+  };
+  card.addEventListener('pointerup', finish);
+  card.addEventListener('pointercancel', finish);
+
+  // Swallow the click that a swipe would otherwise deliver to the accordion.
+  card.addEventListener('click', e => {
+    if (swiped) { e.preventDefault(); e.stopPropagation(); swiped = false; }
+  }, true);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1661,44 +1991,6 @@ async function handleFinishSession(date) {
   );
 }
 
-function promptMidWorkoutSwap(originalId, originalName, date) {
-  showFormDialog(
-    `Swap "${originalName}" for another exercise this session.`,
-    [{ name: 'name', label: 'Substitute exercise', placeholder: 'e.g. Machine Press' }],
-    async ({ name }) => {
-      if (!name) return;
-
-      const dayIdx  = dayIndexOf(date);
-      const origEx  = state.plan?.days[dayIdx]?.exercises?.find(e => e.id === originalId);
-      const swapEx  = {
-        id:         generateId('swap'),
-        name,
-        sets:       origEx?.sets ?? 3,
-        reps:       origEx?.reps ?? '8',
-        unit:       origEx?.unit ?? 'reps',
-        muscles:    '',
-        cue:        '',
-        isSwap:     true,
-        originalId,
-      };
-
-      const swapsKey = `swaps_${date}`;
-      const swapDoc  = state.meta[swapsKey] ?? { key: swapsKey, value: [] };
-      swapDoc.value.push(swapEx);
-      await put('meta', swapDoc);
-      state.meta[swapsKey] = swapDoc;
-
-      // Fully replace — hide the original from this date's session
-      await addRemovedId(date, originalId);
-
-      renderToday();
-      renderWeekStrip();
-      showToast(`Swapped to "${swapEx.name}".`);
-    },
-    'Swap'
-  );
-}
-
 /**
  * Every exercise definition ever created — recurring plan (archived
  * included, so long-gone exercises still autocomplete) plus all session-
@@ -1720,6 +2012,11 @@ function buildKnownExerciseList() {
     if (!key.startsWith('swaps_')) continue;
     for (const ex of state.meta[key]?.value ?? []) consider(ex);
   }
+  // Backfilled orphans are re-selectable too — but archived ones stay hidden.
+  for (const reg of Object.values(getRegistry())) {
+    if (reg.archived) continue;
+    consider({ id: reg.id, name: reg.name, sets: reg.sets ?? 3, reps: reg.reps ?? '8', unit: reg.unit ?? 'reps', muscles: '', cue: '' });
+  }
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -1738,10 +2035,15 @@ function handleAddExercise(date) {
     [
       { name: 'name', label: 'Exercise name', placeholder: 'Type to search…' },
       { name: 'sets', label: 'Sets', type: 'number', inputmode: 'numeric', value: '3' },
+      { name: 'unit', label: 'Target unit', options: [
+          { value: 'reps',    label: 'Reps (count)' },
+          { value: 'seconds', label: 'Seconds (hold)' },
+        ], value: 'reps' },
       { name: 'reps', label: 'Reps target', value: '8' },
     ],
-    async ({ name, sets, reps }) => {
+    async ({ name, sets, unit, reps }) => {
       if (!name) return;
+      const chosenUnit = unit === 'seconds' ? 'seconds' : 'reps';
 
       // Typed text that exactly matches a known exercise attaches it even
       // without an explicit tap — never create a duplicate record by name
@@ -1771,8 +2073,8 @@ function handleAddExercise(date) {
             id:         generateId('added'),
             name,
             sets:       parseInt(sets, 10) || 3,
-            reps:       reps || '8',
-            unit:       'reps',
+            reps:       reps || (chosenUnit === 'seconds' ? '30' : '8'),
+            unit:       chosenUnit,
             muscles:    '',
             cue:        '',
             isAdded:    true,
@@ -1793,10 +2095,18 @@ function handleAddExercise(date) {
   );
 
   // Autocomplete: filtered suggestion list under the name input
-  const wrap      = document.getElementById('dialog-inputs');
-  const nameInput = wrap.querySelector('[data-field="name"]');
-  const setsInput = wrap.querySelector('[data-field="sets"]');
-  const repsInput = wrap.querySelector('[data-field="reps"]');
+  const wrap       = document.getElementById('dialog-inputs');
+  const nameInput  = wrap.querySelector('[data-field="name"]');
+  const setsInput  = wrap.querySelector('[data-field="sets"]');
+  const unitSelect = wrap.querySelector('[data-field="unit"]');
+  const repsInput  = wrap.querySelector('[data-field="reps"]');
+
+  // Keep the reps-target label honest as the unit changes (Reps ↔ Seconds).
+  const syncUnitLabel = unit => {
+    repsInput.closest('.dialog-field').querySelector('.dialog-input-label')
+      .textContent = unit === 'seconds' ? 'Seconds target' : 'Reps target';
+  };
+  unitSelect.addEventListener('change', () => syncUnitLabel(unitSelect.value));
 
   const listEl = document.createElement('div');
   listEl.className = 'autocomplete-list';
@@ -1828,11 +2138,11 @@ function handleAddExercise(date) {
         } else {
           selected = known.find(k => k.name === item.dataset.name) ?? null;
           if (selected) {
-            nameInput.value = selected.name;
-            setsInput.value = String(selected.sets ?? 3);
-            repsInput.value = String(selected.reps ?? '8');
-            repsInput.closest('.dialog-field').querySelector('.dialog-input-label')
-              .textContent = (selected.unit === 'seconds') ? 'Seconds target' : 'Reps target';
+            nameInput.value  = selected.name;
+            setsInput.value  = String(selected.sets ?? 3);
+            repsInput.value  = String(selected.reps ?? '8');
+            unitSelect.value = selected.unit === 'seconds' ? 'seconds' : 'reps';
+            syncUnitLabel(unitSelect.value);
           }
         }
         listEl.hidden = true;
@@ -1853,7 +2163,17 @@ function handleAddExercise(date) {
  * session-scoped removal list; added/swapped extras are deleted outright.
  */
 async function handleRemoveExercise(exerciseId, exerciseName, date) {
-  showDialog(`Remove "${exerciseName}" from this session?`, async () => {
+  // Make the confirmation explicit when today's session already has logged sets
+  // for this exercise — those historical logs are kept, only this day's
+  // instance is removed, but the user should know before committing.
+  const loggedToday = state.logs.filter(
+    l => l.exerciseId === exerciseId && l.date === date && l.done
+  ).length;
+  const warning = loggedToday > 0
+    ? ` You've logged ${loggedToday} set${loggedToday === 1 ? '' : 's'} for it today — those logs are kept in your history, only today's session removes it.`
+    : '';
+
+  showDialog(`Remove "${exerciseName}" from this session?${warning}`, async () => {
     const { extras } = resolveExercisesForDate(date);
     const extraEx  = extras.find(e => e.id === exerciseId);
 
@@ -2394,6 +2714,15 @@ async function handleSavePlan() {
 function renderData() {
   document.getElementById('app-version').textContent = 'v1.0.0';
   renderStorageStatus();
+
+  // Surface the orphan-naming card only when there is something to name.
+  const orphanCount = findOrphanExerciseIds().length;
+  const card = document.getElementById('orphan-review-card');
+  const btn  = document.getElementById('review-orphans-btn');
+  if (card && btn) {
+    card.hidden = orphanCount === 0;
+    btn.textContent = `Name ${orphanCount} unnamed exercise${orphanCount === 1 ? '' : 's'}`;
+  }
 }
 
 /**
@@ -2507,6 +2836,7 @@ async function handleImport(event) {
         await loadState();
         await dropRetiredMeta();
         await migrateExerciseUnits();
+        await migrateInclineDbLabel();
         state.ui.viewedDate = state.ui.today;
         render();
         showToast('Data imported successfully.');

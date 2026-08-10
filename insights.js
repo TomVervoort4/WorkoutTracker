@@ -151,6 +151,14 @@ function buildExerciseCatalog(plan, meta) {
     }
   }
 
+  // Backfilled orphans — named through the review screen, kept in the registry.
+  const registry = meta['exerciseRegistry']?.value ?? {};
+  for (const id in registry) {
+    const entry = registry[id];
+    if (!entry?.name) continue;
+    catalog.set(id, { id, name: entry.name, isCompound: isCompoundExercise(entry.name) });
+  }
+
   return catalog;
 }
 

@@ -300,6 +300,12 @@
         <input type="file" id="import-file-input" accept=".json" style="display:none" aria-label="Import JSON backup" />
       </div>
 
+      <div class="card data-card" id="orphan-review-card" hidden>
+        <p class="data-card-title">Name unnamed exercises</p>
+        <p class="data-card-desc">Some exercises were logged without a name. Review them to add the real names — their history is kept either way.</p>
+        <button class="btn-secondary" id="review-orphans-btn">Name unnamed exercises</button>
+      </div>
+
       <div class="card data-card danger-card">
         <p class="data-card-title danger-title">Clear all data</p>
         <p class="data-card-desc">Permanently delete all workouts, logs, and settings. This cannot be undone.</p>
@@ -411,6 +417,28 @@
         <button class="btn-secondary" id="dialog-cancel-btn">Cancel</button>
         <button class="btn-danger" id="dialog-confirm-btn">Confirm</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       ORPHAN EXERCISE REVIEW OVERLAY
+  ═══════════════════════════════════════════ -->
+  <div class="orphan-review-overlay" id="orphan-review-overlay" hidden aria-modal="true" role="dialog" aria-labelledby="orphan-review-title">
+    <div class="orphan-review-box">
+      <header class="orphan-review-head">
+        <h2 class="orphan-review-title" id="orphan-review-title">Name your exercises</h2>
+        <p class="orphan-review-sub">
+          These exercises were logged without a name. Add the real name and unit,
+          or archive it. Nothing is deleted — your history is kept either way.
+        </p>
+      </header>
+      <div class="orphan-review-list" id="orphan-review-list">
+        <!-- JS renders one row per unnamed exercise here -->
+      </div>
+      <footer class="orphan-review-actions">
+        <button class="btn-secondary" id="orphan-review-later-btn">Later</button>
+        <button class="btn-primary" id="orphan-review-save-btn">Save names</button>
+      </footer>
     </div>
   </div>
 
