@@ -24,10 +24,6 @@ import {
 //  CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Bumped in lockstep with the service-worker cache version; shown in the Data
-// tab's sharing diagnostics so a screenshot self-identifies which build is live.
-const BUILD_ID = 'v14';
-
 const DAY_NAMES_LONG  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const DAY_NAMES_SHORT = ['M','T','W','T','F','S','S'];
 const MONTH_NAMES     = [
@@ -1028,11 +1024,6 @@ async function init() {
   document.getElementById('import-file-input').addEventListener('change', handleImport);
   document.getElementById('clear-data-btn').addEventListener('click', handleClearData);
   document.getElementById('review-orphans-btn').addEventListener('click', () => openOrphanReview());
-
-  // 8a. Web Share diagnostic tests (troubleshooting only)
-  document.getElementById('share-test-text').addEventListener('click', () => runShareTest('text'));
-  document.getElementById('share-test-fileonly').addEventListener('click', () => runShareTest('fileonly'));
-  document.getElementById('share-test-filetext').addEventListener('click', () => runShareTest('filetext'));
 
   // 8b. Orphan-review overlay controls
   document.getElementById('orphan-review-later-btn').addEventListener('click', closeOrphanReview);
@@ -3119,7 +3110,6 @@ async function handleSavePlan() {
 function renderData() {
   document.getElementById('app-version').textContent = 'v1.0.0';
   renderStorageStatus();
-  renderShareDiagnostics();
   // Serialise a fresh snapshot now so Back up can call share() synchronously.
   prepareBackupSnapshot();
 
@@ -3195,60 +3185,6 @@ async function buildBackupPayload() {
 }
 
 /**
- * Back the data up off-device. On a phone that can share files, this hands the
- * JSON snapshot to the system share sheet, where "Save to Drive" is one tap away
- * — giving the data a durable home outside wipeable browser storage. Everywhere
- * the file-share API is absent (most desktops) it falls back to a plain file
- * download. This share hand-off is the app's ONLY network interaction: no Drive
- * API, no OAuth, no credentials — the OS moves the file, not us.
- */
-/**
- * Read-out of what this browser actually supports for Web Share, shown in a
- * collapsed panel on the Data tab. Pure local capability probing — no network,
- * no state change. Exists to diagnose "Back up only downloads" on a real device
- * we can't attach a console to: it distinguishes a missing API, a rejected file
- * type, a thrown share(), and a cancelled sheet from one another.
- */
-function renderShareDiagnostics() {
-  const el = document.getElementById('share-diag');
-  if (!el) return;
-
-  const probe = (name) => {
-    if (!navigator.canShare) return 'n/a';
-    try {
-      return navigator.canShare({ files: [new File(['{}'], name, { type: 'text/plain' })] })
-        ? 'yes' : 'no';
-    } catch {
-      return 'error';
-    }
-  };
-
-  const standalone =
-    window.matchMedia?.('(display-mode: standalone)')?.matches === true ||
-    window.navigator.standalone === true;
-
-  const prepared = preparedBackup
-    ? (preparedBackup.file ? `yes (${preparedBackup.file.name})` : 'built, not shareable')
-    : 'none yet';
-
-  el.textContent = [
-    `build            : ${BUILD_ID}`,
-    `secure context   : ${window.isSecureContext}`,
-    `standalone (PWA) : ${standalone}`,
-    `navigator.share  : ${typeof navigator.share !== 'undefined' ? 'present' : 'MISSING'}`,
-    `navigator.canShare: ${typeof navigator.canShare !== 'undefined' ? 'present' : 'MISSING'}`,
-    `canShare .json   : ${probe('fittrack.json')}`,
-    `canShare .txt    : ${probe('fittrack.txt')}`,
-    `prepared file    : ${prepared}`,
-    `last backup      : ${state.ui.lastShareOutcome ?? '— (not tried yet)'}`,
-    `test text        : ${state.ui.shareTests?.text     ?? '—'}`,
-    `test file only   : ${state.ui.shareTests?.fileonly ?? '—'}`,
-    `test file + text : ${state.ui.shareTests?.filetext ?? '—'}`,
-    `user agent       : ${navigator.userAgent}`,
-  ].join('\n');
-}
-
-/**
  * The most recent snapshot, serialised and ready to hand to the share sheet.
  * Built asynchronously when the Data tab opens (see `prepareBackupSnapshot`) so
  * that the Back-up tap can call `navigator.share()` SYNCHRONOUSLY.
@@ -3278,44 +3214,21 @@ async function prepareBackupSnapshot() {
     console.error('[FitTrack] Could not prepare backup snapshot:', err);
     preparedBackup = null;
   }
-  renderShareDiagnostics();
 }
 
 /**
- * Hand the prepared snapshot to the OS share sheet (→ "Save to Drive"), or fall
- * back to a download. MUST stay synchronous up to the `navigator.share()` call —
- * no `await` before it — or Chrome Android voids the tap's user activation and
- * throws NotAllowedError. All the async work already happened in
- * `prepareBackupSnapshot`; here we only touch the in-memory `preparedBackup`.
+ * Back the data up off-device. On a phone that can share files, this hands the
+ * JSON snapshot to the system share sheet, where "Save to Drive" is one tap away
+ * — giving the data a durable home outside wipeable browser storage. Everywhere
+ * the file-share API is absent (most desktops) it falls back to a plain file
+ * download. This share hand-off is the app's ONLY network interaction: no Drive
+ * API, no OAuth, no credentials — the OS moves the file, not us.
+ *
+ * MUST stay synchronous up to the `navigator.share()` call — no `await` before
+ * it — or Chrome Android voids the tap's user activation and throws
+ * NotAllowedError. All the async work already happened in `prepareBackupSnapshot`;
+ * here we only touch the in-memory `preparedBackup`.
  */
-/**
- * Diagnostic-only: run one variant of navigator.share() straight from a real
- * button tap and record what it does. Isolates whether Web Share is blocked
- * outright (all variants throw "Permission denied") or only for files.
- */
-function runShareTest(kind) {
-  state.ui.shareTests = state.ui.shareTests || {};
-  const act = navigator.userActivation ? `active=${navigator.userActivation.isActive}` : 'active=n/a';
-  const set = (msg) => { state.ui.shareTests[kind] = `${msg} (${act})`; renderShareDiagnostics(); };
-
-  if (!navigator.share) { set('no navigator.share'); return; }
-
-  let data;
-  if (kind === 'text') {
-    data = { title: 'FitTrack test', text: 'FitTrack share test' };
-  } else {
-    const file = preparedBackup?.file;
-    if (!file) { set('no prepared file — open Data tab first'); return; }
-    data = kind === 'fileonly'
-      ? { files: [file] }
-      : { files: [file], title: 'FitTrack backup', text: 'FitTrack data backup' };
-  }
-
-  navigator.share(data)
-    .then(() => set('OK'))
-    .catch(err => set(`${err?.name || 'Error'}: ${err?.message || err}`));
-}
-
 function handleExport() {
   const snap = preparedBackup;
 
@@ -3333,41 +3246,23 @@ function handleExport() {
 
   const { file, json, dateStr } = snap;
 
-  // Snapshot of the tap's activation state at the instant we call share(). If
-  // this reads active=false, the gesture was lost before the call (an ordering
-  // bug); if active=true and share() still throws, the block is elsewhere
-  // (e.g. a Permissions-Policy on the host), which needs a different fix.
-  const act = navigator.userActivation
-    ? `active=${navigator.userActivation.isActive}`
-    : 'active=n/a';
-
   if (file) {
     // Share the file ONLY — no title/text. Some Android share targets reject a
     // files payload that also carries title/text with NotAllowedError even when
     // canShare() said yes, so we send the leanest possible payload.
     navigator.share({ files: [file] })
-      .then(() => {
-        state.ui.lastShareOutcome = `shared OK as ${file.name} (${act})`;
-        showToast('Backup ready — save it to Drive.');
-      })
+      .then(() => showToast('Backup ready — save it to Drive.'))
       .catch(err => {
-        if (err?.name === 'AbortError') {
-          state.ui.lastShareOutcome = `share sheet cancelled (${act})`;
-        } else {
-          state.ui.lastShareOutcome = `share() threw ${err?.name || 'Error'}: ${err?.message || err} (${act})`;
-          console.error('[FitTrack] Share failed, falling back to download:', err);
-          downloadBackup(json, dateStr);
-        }
-      })
-      .finally(renderShareDiagnostics);
+        // A cancelled share sheet is not an error — leave the user be.
+        if (err?.name === 'AbortError') return;
+        console.error('[FitTrack] Share failed, falling back to download:', err);
+        downloadBackup(json, dateStr);
+      });
     return;
   }
 
-  state.ui.lastShareOutcome = navigator.canShare
-    ? `canShare() rejected both .json and .txt (${act})`
-    : 'navigator.canShare is unavailable on this browser';
+  // No shareable file (e.g. desktop) — download the snapshot instead.
   downloadBackup(json, dateStr);
-  renderShareDiagnostics();
 }
 
 /**
