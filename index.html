@@ -157,7 +157,7 @@
     <section class="tab-view" id="view-progress" role="tabpanel" aria-label="Progress" hidden>
 
       <div class="section-header">
-        <h2 class="section-title">Volume per Week</h2>
+        <h2 class="section-title">Weekly Volume by Session</h2>
       </div>
       <div class="card chart-card" id="volume-chart-card">
         <canvas id="volume-chart" aria-label="Weekly volume chart" role="img"></canvas>
@@ -171,6 +171,9 @@
         <select class="select-input" id="history-exercise-select" aria-label="Select exercise to view history">
           <option value="">-- Select an exercise --</option>
         </select>
+        <div class="exercise-progression" id="history-progression">
+          <!-- JS renders the per-exercise progression chart here -->
+        </div>
         <div class="history-list" id="history-list">
           <!-- JS renders history rows here -->
         </div>

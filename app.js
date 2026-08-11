@@ -7,7 +7,7 @@
  */
 
 import { get, put, del, getAll, getAllKeys, putMany, clear } from './db.js';
-import { checkForNewPB, computeRecentPRs, computePlateaus, getExercisePR } from './insights.js';
+import { checkForNewPB, computeRecentPRs, computePlateaus, computeExerciseSeries, getExercisePR } from './insights.js';
 import {
   importFitdaysFile,
   loadBodyComposition,
@@ -1628,6 +1628,21 @@ function trainingWeekStreak() {
   return streak;
 }
 
+// Module 5 — a "gap" is a past training day (a non-rest day per the plan) with
+// no logged session, inside this lookback window. Purely factual: the app lists
+// missed expected sessions, it does not judge whether a gap was acceptable.
+const CONSISTENCY_GAP_WINDOW_DAYS = 28;
+
+/** Past training days with no session logged, within the window, newest first. */
+function recentMissedSessions() {
+  const misses = [];
+  for (let i = 1; i <= CONSISTENCY_GAP_WINDOW_DAYS; i++) {
+    const d = dateStrPlus(state.ui.today, -i);
+    if (getDayStatus(d) === 'missed') misses.push(d);
+  }
+  return misses;
+}
+
 /**
  * The next thing the plan calls for: today's session if it is a training day
  * that isn't finished yet, otherwise the next training day within two weeks.
@@ -1750,6 +1765,17 @@ function buildHubConsistency() {
     return `<span class="hub-dot hub-dot-${status}" title="${escHtml(friendlyDateLabel(d))}"></span>`;
   }).join('');
 
+  // Module 5 — notable gaps: missed expected sessions in the recent window.
+  // Shown only when there are any; the line itself is the signal. Facts only.
+  const misses = recentMissedSessions();
+  const gapsRow = misses.length ? `
+      <div class="hub-gaps">
+        <span class="hub-gaps-count">${misses.length} missed</span>
+        <span class="hub-gaps-detail">last ${CONSISTENCY_GAP_WINDOW_DAYS} days · ${
+          misses.slice(0, 3).map(d => escHtml(friendlyDateLabel(d))).join(', ')
+        }${misses.length > 3 ? ` +${misses.length - 3}` : ''}</span>
+      </div>` : '';
+
   return `
     <div class="card hub-card hub-consistency">
       <div class="hub-stat-row">
@@ -1767,6 +1793,7 @@ function buildHubConsistency() {
         </div>
       </div>
       <div class="hub-week-dots" role="img" aria-label="${thisWeek} sessions logged this week">${dots}</div>
+      ${gapsRow}
     </div>`;
 }
 
@@ -1900,6 +1927,118 @@ function buildHubPlateaus() {
     </div>`;
 }
 
+/**
+ * The "key lift" for the strength-vs-bodyweight overlay: the weighted exercise
+ * with the most logged sessions (tie-break by name). Deterministic; null when
+ * no weighted lift has enough history.
+ */
+function pickKeyLift() {
+  const datesById = new Map();
+  for (const l of state.logs) {
+    if (!l.done || l.weight == null || l.reps == null) continue;
+    if (getExerciseLoadType(l.exerciseId) !== 'weighted') continue;
+    (datesById.get(l.exerciseId) ?? datesById.set(l.exerciseId, new Set()).get(l.exerciseId)).add(l.date);
+  }
+  let best = null;
+  for (const [id, dates] of datesById) {
+    const sessions = dates.size;
+    if (sessions < 2) continue;
+    const name = getExerciseName(id);
+    if (!best || sessions > best.sessions ||
+        (sessions === best.sessions && name.localeCompare(best.name) < 0)) {
+      best = { id, name, sessions };
+    }
+  }
+  return best;
+}
+
+/**
+ * Module 6 — a shared-timeline overlay of the key lift's estimated 1RM and
+ * bodyweight, for reading together. DISPLAY ONLY, by design: the app places two
+ * existing series on one time axis and nothing more. It does not pair sessions
+ * to weigh-ins, compute a correlation, or exclude shoot days — that reasoning
+ * stays in the Claude analysis layer. Dual y-axes (bodyweight left, e1RM right)
+ * because the two live on different scales. Renders nothing without both series.
+ */
+function buildStrengthBodyweightChartSVG(bw, strength, liftName) {
+  const W = 320, H = 176;
+  const P = { top: 16, right: 40, bottom: 30, left: 40 };
+  const cW = W - P.left - P.right;
+  const cH = H - P.top  - P.bottom;
+  const BW_COLOR = '#38D39F', S_COLOR = '#00F0FF';
+
+  const t = ds => parseDate(ds).getTime();
+  const allT = [...bw, ...strength].map(p => t(p.date));
+  const tMin = Math.min(...allT), tMax = Math.max(...allT);
+  const x = ts => P.left + (tMax === tMin ? cW / 2 : ((ts - tMin) / (tMax - tMin)) * cW);
+
+  const rangeOf = arr => {
+    const v = arr.map(p => p.value);
+    let lo = Math.min(...v), hi = Math.max(...v);
+    if (lo === hi) { lo -= 1; hi += 1; }
+    return { lo, hi };
+  };
+  const bwR = rangeOf(bw), sR = rangeOf(strength);
+  const yBw = v => P.top + cH - ((v - bwR.lo) / (bwR.hi - bwR.lo)) * cH;
+  const yS  = v => P.top + cH - ((v - sR.lo) / (sR.hi - sR.lo)) * cH;
+
+  const lineOf = (arr, yfn) => arr.map(p => `${x(t(p.date)).toFixed(1)},${yfn(p.value).toFixed(1)}`).join(' ');
+  const dotsOf = (arr, yfn, c) => arr.map(p =>
+    `<circle cx="${x(t(p.date)).toFixed(1)}" cy="${yfn(p.value).toFixed(1)}" r="2.2" fill="${c}"/>`).join('');
+
+  const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
+  const firstLabel = formatDate(new Date(tMin)).slice(5);
+  const lastLabel  = formatDate(new Date(tMax)).slice(5);
+
+  const legend = `<div class="volume-legend">
+      <span class="volume-legend-item"><span class="volume-legend-dot" style="background:${BW_COLOR}"></span>Bodyweight</span>
+      <span class="volume-legend-item"><span class="volume-legend-dot" style="background:${S_COLOR}"></span>${escHtml(liftName)} e1RM</span>
+    </div>`;
+
+  return `
+    ${legend}
+    <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"
+         style="width:100%;display:block;overflow:visible" role="img"
+         aria-label="Bodyweight and ${escHtml(liftName)} estimated 1RM on a shared timeline">
+      <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}" stroke="#21262D" stroke-width="1"/>
+      <line x1="${P.left + cW}" y1="${P.top}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="#21262D" stroke-width="1"/>
+      <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="#21262D" stroke-width="1"/>
+      <polyline points="${lineOf(bw, yBw)}" fill="none" stroke="${BW_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      <polyline points="${lineOf(strength, yS)}" fill="none" stroke="${S_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${dotsOf(bw, yBw, BW_COLOR)}
+      ${dotsOf(strength, yS, S_COLOR)}
+      <g font-size="10" font-family="Inter,system-ui,sans-serif">
+        <text x="${(P.left - 5).toFixed(1)}" y="${P.top.toFixed(1)}" dominant-baseline="middle" text-anchor="end" fill="${BW_COLOR}">${fmt(bwR.hi)}</text>
+        <text x="${(P.left - 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}" dominant-baseline="middle" text-anchor="end" fill="${BW_COLOR}">${fmt(bwR.lo)}</text>
+        <text x="${(P.left + cW + 5).toFixed(1)}" y="${P.top.toFixed(1)}" dominant-baseline="middle" text-anchor="start" fill="${S_COLOR}">${fmt(sR.hi)}</text>
+        <text x="${(P.left + cW + 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}" dominant-baseline="middle" text-anchor="start" fill="${S_COLOR}">${fmt(sR.lo)}</text>
+        <text x="${P.left.toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="#8B949E">${escHtml(firstLabel)}</text>
+        <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="#8B949E">${escHtml(lastLabel)}</text>
+      </g>
+    </svg>`;
+}
+
+function buildHubStrengthBodyweight(days) {
+  const bw = days.filter(d => d.weight != null).map(d => ({ date: d.date, value: d.weight }));
+  if (bw.length < 2) return '';
+
+  const lift = pickKeyLift();
+  if (!lift) return '';
+
+  const strength = computeExerciseSeries(state, lift.id, { name: lift.name, unit: 'reps', loadType: 'weighted' }).points;
+  if (strength.length < 2) return '';
+
+  return `
+    <div class="card hub-card hub-strength-bw">
+      <div class="hub-card-head">
+        <span class="hub-card-title">Strength vs Bodyweight</span>
+        <span class="hub-card-meta">shared timeline</span>
+      </div>
+      ${buildStrengthBodyweightChartSVG(bw, strength, lift.name)}
+      <p class="hub-chart-note">Two trends on one axis, for reading together — the app doesn't pair or correlate them.</p>
+    </div>`;
+}
+
 function buildHubQuickActions() {
   const action = (act, label, path) => `
     <button class="hub-action" data-hub-action="${act}">
@@ -1927,6 +2066,7 @@ function renderHub() {
     buildHubConsistency() +
     buildHubBody(days) +
     buildHubTrend(days) +
+    buildHubStrengthBodyweight(days) +
     buildHubPRs() +
     buildHubPlateaus() +
     buildHubQuickActions();
@@ -2752,36 +2892,67 @@ function renderProgress() {
   // Weekly volume chart
   const volCard = document.getElementById('volume-chart-card');
   const volData = buildWeeklyVolumeData();
-  if (volData.some(w => w.volume > 0)) {
+  if (volData.some(w => w.total > 0)) {
     volCard.innerHTML = buildVolumeChartSVG(volData);
   } else {
     volCard.innerHTML =
-      '<p class="chart-empty">Complete some sessions to see volume trends.</p>';
+      '<p class="chart-empty">Complete some weighted sessions to see volume trends.</p>';
   }
 
   // Exercise history selector
   populateHistorySelect();
 }
 
+// Deterministic colour slots for session types, assigned in plan-day order.
+const SESSION_TYPE_COLORS = ['#00F0FF', '#7C5CFF', '#FFB020', '#FF5C7C', '#38D39F', '#8B949E'];
+
+/** The plan's session name for the weekday a date falls on, or 'Other'. */
+function sessionTypeForDate(dateStr) {
+  const name = state.plan?.days?.[dayIndexOf(dateStr)]?.sessionName?.trim();
+  return name || 'Other';
+}
+
+/**
+ * Module 4 — weekly working-set volume, split by session type. Volume counts
+ * only `weighted` load (weight × reps): bodyweight/assisted/timed/rep work has
+ * no meaningful tonnage, and this also keeps any leaked bodyweight out of the
+ * totals. Last 10 ISO weeks, Mon-anchored.
+ */
 function buildWeeklyVolumeData() {
-  // Last 10 ISO weeks, Mon-anchored
   const today = new Date();
   const weeks = Array.from({ length: 10 }, (_, i) => {
     const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (9 - i) * 7);
     return {
       weekStr: isoWeekStr(d),
       label:   formatDate(getMondayOf(d)).slice(5), // 'MM-DD'
-      volume:  0,
+      byType:  {},
+      total:   0,
     };
   });
 
   for (const log of state.logs) {
     if (!log.done || !log.weight || !log.reps) continue;
-    const wk   = isoWeekStr(parseDate(log.date));
-    const slot = weeks.find(w => w.weekStr === wk);
-    if (slot) slot.volume += log.weight * log.reps;
+    if (getExerciseLoadType(log.exerciseId) !== 'weighted') continue;
+    const slot = weeks.find(w => w.weekStr === isoWeekStr(parseDate(log.date)));
+    if (!slot) continue;
+    const type = sessionTypeForDate(log.date);
+    const vol  = log.weight * log.reps;
+    slot.byType[type] = (slot.byType[type] ?? 0) + vol;
+    slot.total += vol;
   }
   return weeks;
+}
+
+/** Ordered session types present in the data — plan-day order first, extras last. */
+function orderedSessionTypes(weeks) {
+  const planTypes = [...new Set(
+    (state.plan?.days ?? []).map(d => d.sessionName?.trim()).filter(Boolean)
+  )];
+  const dataTypes = [...new Set(weeks.flatMap(w => Object.keys(w.byType)))];
+  return [
+    ...planTypes.filter(t => dataTypes.includes(t)),
+    ...dataTypes.filter(t => !planTypes.includes(t)),
+  ];
 }
 
 function buildVolumeChartSVG(weeks) {
@@ -2791,27 +2962,45 @@ function buildVolumeChartSVG(weeks) {
   const cH = H - P.top  - P.bottom;
   const n  = weeks.length;
 
-  const maxVol = Math.max(...weeks.map(w => w.volume), 1);
-  const barW   = Math.max(Math.floor(cW / n) - 4, 4);
-  const gap    = Math.floor((cW - barW * n) / (n - 1 || 1));
+  const types    = orderedSessionTypes(weeks);
+  const colorOf  = t => SESSION_TYPE_COLORS[types.indexOf(t) % SESSION_TYPE_COLORS.length];
+  const maxVol   = Math.max(...weeks.map(w => w.total), 1);
+  const barW     = Math.max(Math.floor(cW / n) - 4, 4);
+  const gap      = Math.floor((cW - barW * n) / (n - 1 || 1));
 
+  // Each week is one stacked bar: a segment per session type, bottom-up.
   const bars = weeks.map((w, i) => {
-    const x  = P.left + i * (barW + gap);
-    const bh = w.volume > 0 ? Math.max((w.volume / maxVol) * cH, 3) : 0;
-    const y  = P.top + cH - bh;
-    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}"
-                  width="${barW}" height="${bh.toFixed(1)}"
-                  rx="2" fill="${w.volume > 0 ? '#00F0FF' : '#21262D'}" opacity="0.85"/>`;
+    const x = P.left + i * (barW + gap);
+    if (w.total <= 0) {
+      return `<rect x="${x.toFixed(1)}" y="${(P.top + cH - 2).toFixed(1)}"
+                    width="${barW}" height="2" rx="1" fill="#21262D"/>`;
+    }
+    let yCursor = P.top + cH;
+    return types.map(t => {
+      const vol = w.byType[t] ?? 0;
+      if (vol <= 0) return '';
+      const segH = (vol / maxVol) * cH;
+      yCursor -= segH;
+      return `<rect x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}"
+                    width="${barW}" height="${segH.toFixed(1)}"
+                    fill="${colorOf(t)}" opacity="0.9"/>`;
+    }).join('');
   }).join('');
 
-  // Y-axis labels in tonnes for readability
   const topTonne = (maxVol / 1000).toFixed(1);
   const midTonne = (maxVol / 2000).toFixed(1);
 
+  const legend = types.length
+    ? `<div class="volume-legend">${types.map(t =>
+        `<span class="volume-legend-item"><span class="volume-legend-dot" style="background:${colorOf(t)}"></span>${escHtml(t)}</span>`
+      ).join('')}</div>`
+    : '';
+
   return `
+    ${legend}
     <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"
          style="width:100%;display:block;overflow:visible"
-         role="img" aria-label="Weekly training volume">
+         role="img" aria-label="Weekly training volume by session type">
       <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}"
             stroke="#21262D" stroke-width="1"/>
       <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}"
@@ -2824,6 +3013,62 @@ function buildVolumeChartSVG(weeks) {
               dominant-baseline="middle" text-anchor="end">${midTonne}t</text>
         <text x="${P.left.toFixed(1)}"           y="${H - 4}" text-anchor="middle">${weeks[0]?.label ?? ''}</text>
         <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle">${weeks[n - 1]?.label ?? ''}</text>
+      </g>
+    </svg>`;
+}
+
+/**
+ * Module 3 — a small, deterministic line chart of one exercise's progression
+ * metric (per loadType), one point per logged session. Straight segments
+ * between real points: no smoothing, nothing hidden. Matches the volume chart's
+ * house palette. Assumes at least two points.
+ */
+function buildProgressionChartSVG(series) {
+  const pts = series.points;
+  const n   = pts.length;
+  const W = 320, H = 160;
+  const P = { top: 16, right: 12, bottom: 28, left: 44 };
+  const cW = W - P.left - P.right;
+  const cH = H - P.top  - P.bottom;
+
+  const vals   = pts.map(p => p.value);
+  const dataLo = Math.min(...vals);
+  const dataHi = Math.max(...vals);
+  // A perfectly flat run still needs vertical room to draw a line through.
+  let lo = dataLo, hi = dataHi;
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const span = hi - lo;
+
+  const x = i => P.left + (i / (n - 1)) * cW;
+  const y = v => P.top + cH - ((v - lo) / span) * cH;
+
+  const linePts = pts.map((p, i) => `${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
+  const dots = pts.map((p, i) =>
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="2.5" fill="#00F0FF"/>`).join('');
+
+  const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
+  const firstLabel = formatDate(parseDate(pts[0].date)).slice(5);
+  const lastLabel  = formatDate(parseDate(pts[n - 1].date)).slice(5);
+
+  return `
+    <div class="progression-caption">${escHtml(series.metricLabel)}${series.lowerIsBetter ? ' · lower is better' : ''}</div>
+    <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"
+         style="width:100%;display:block;overflow:visible" role="img"
+         aria-label="${escHtml(series.metricLabel)} across ${n} sessions">
+      <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}"
+            stroke="#21262D" stroke-width="1"/>
+      <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}"
+            stroke="#21262D" stroke-width="1"/>
+      <polyline points="${linePts}" fill="none" stroke="#00F0FF" stroke-width="2"
+                stroke-linejoin="round" stroke-linecap="round"/>
+      ${dots}
+      <g font-size="10" fill="#8B949E" font-family="Inter,system-ui,sans-serif">
+        <text x="${(P.left - 5).toFixed(1)}" y="${P.top.toFixed(1)}"
+              dominant-baseline="middle" text-anchor="end">${fmt(dataHi)}</text>
+        <text x="${(P.left - 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}"
+              dominant-baseline="middle" text-anchor="end">${fmt(dataLo)}</text>
+        <text x="${P.left.toFixed(1)}"           y="${H - 4}" text-anchor="middle">${escHtml(firstLabel)}</text>
+        <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle">${escHtml(lastLabel)}</text>
       </g>
     </svg>`;
 }
@@ -2894,7 +3139,8 @@ function populateHistorySelect() {
 
 function renderExerciseHistory(exerciseId) {
   const list = document.getElementById('history-list');
-  if (!exerciseId) { list.innerHTML = ''; return; }
+  const prog = document.getElementById('history-progression');
+  if (!exerciseId) { list.innerHTML = ''; prog.innerHTML = ''; return; }
 
   // Group done logs by date
   const byDate = {};
@@ -2907,14 +3153,30 @@ function renderExerciseHistory(exerciseId) {
   const dates = Object.keys(byDate).sort().reverse();
   if (!dates.length) {
     list.innerHTML = '<p class="chart-empty">No history yet for this exercise.</p>';
+    prog.innerHTML = '';
     return;
   }
 
   const unit      = getExerciseUnit(exerciseId);
   const loadType  = getExerciseLoadType(exerciseId) ?? (unit === 'seconds' ? 'timed' : 'reps');
+
+  // Module 3 — per-exercise progression trend (needs at least two sessions).
+  const series = computeExerciseSeries(state, exerciseId, { name: getExerciseName(exerciseId), unit, loadType });
+  prog.innerHTML = series.points.length >= 2 ? buildProgressionChartSVG(series) : '';
   // The PR is a session-level record on this exercise's metric (per loadType);
   // mark the session that holds it, resolved centrally in insights.js.
   const prEntry   = getExercisePR(state, exerciseId, { name: getExerciseName(exerciseId), unit, loadType });
+
+  // Module 7 — sessions where the metric dropped vs the one before. Direction-
+  // aware: for assisted (lower is better) an increase is the regression. Used
+  // only to decide WHERE to co-locate a note — the app never reads the note's
+  // meaning or infers a cause; that stays with Claude.
+  const dropDates = new Set();
+  for (let i = 1; i < series.points.length; i++) {
+    const cur = series.points[i].value, prev = series.points[i - 1].value;
+    const regressed = series.lowerIsBetter ? cur > prev : cur < prev;
+    if (regressed) dropDates.add(series.points[i].date);
+  }
 
   list.innerHTML = dates.map(dateStr => {
     const entries  = byDate[dateStr];
@@ -2941,11 +3203,22 @@ function renderExerciseHistory(exerciseId) {
     }
     const prTag = (prEntry && dateStr === prEntry.date) ? '<span class="history-row-pr">PR</span>' : '';
 
+    // Module 7 — on a session where the metric dropped, show its note verbatim
+    // beside the number. Note and number are co-located; nothing is interpreted.
+    const note = entries.find(l => l.notes && l.notes.trim())?.notes.trim();
+    const noteRow = (dropDates.has(dateStr) && note) ? `
+      <div class="history-note">
+        <span class="history-note-flag" title="Metric dropped this session" aria-hidden="true">↓</span>
+        <span class="history-note-text">${escHtml(note)}</span>
+      </div>` : '';
+
     return `
-      <div class="history-row">
-        <span class="history-row-date">${friendlyDateLabel(dateStr)}</span>
-        <span class="history-row-value">${valueTxt}</span>
-        ${prTag}
+      <div class="history-entry">
+        <div class="history-row">
+          <span class="history-row-date">${friendlyDateLabel(dateStr)}</span>
+          <span class="history-row-value">${valueTxt}</span>
+          ${prTag}
+        </div>${noteRow}
       </div>`;
   }).join('');
 }

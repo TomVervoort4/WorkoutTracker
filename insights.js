@@ -52,6 +52,15 @@ const PLATEAU_METRIC_LABELS = {
   assisted:   'assistance',
 };
 
+// Axis label for the per-exercise progression chart (module 3).
+const SERIES_METRIC_LABELS = {
+  weighted:   'Est. 1RM (kg)',
+  bodyweight: 'Reps',
+  reps:       'Reps',
+  timed:      'Hold (s)',
+  assisted:   'Assist (kg)',
+};
+
 // Floating-point guard so an identical metric counts as "no improvement".
 const IMPROVEMENT_EPSILON = 1e-6;
 
@@ -283,6 +292,32 @@ function computeRecentPRs(state, { today, withinDays = RECENT_PR_WINDOW_DAYS, li
 }
 
 /**
+ * Module 3 — the per-exercise progression series: one point per logged session
+ * (oldest first), plotting that exercise's progression metric per loadType.
+ * Deterministic and lossless — every session is a point, no smoothing. For
+ * assisted work the plotted value is the session's least assistance (so a
+ * downward line is progress — `lowerIsBetter`).
+ */
+function computeExerciseSeries(state, exerciseId, { name = '', unit = 'reps', loadType = null } = {}) {
+  const lt = loadType || (unit === 'seconds' ? 'timed' : 'reps');
+  const points = [];
+  for (const date of distinctDates(state.logs, exerciseId)) {
+    const m = sessionMetric(doneSets(state.logs, exerciseId, date), lt);
+    if (!m) continue;
+    const value = lt === 'assisted' ? m.weight
+      : lt === 'weighted' ? round1(m.value)
+      : m.value;
+    points.push({ date, value });
+  }
+  return {
+    loadType: lt,
+    metricLabel: SERIES_METRIC_LABELS[lt] ?? 'Reps',
+    lowerIsBetter: lt === 'assisted',
+    points,
+  };
+}
+
+/**
  * Module 2 — exercises whose progression metric (set by loadType) hasn't
  * improved across the threshold number of sessions. A factual flag only: the
  * exercise, how many sessions without a gain, and the date of the last record.
@@ -353,6 +388,7 @@ export {
   checkForNewPB,
   computeRecentPRs,
   computePlateaus,
+  computeExerciseSeries,
   getExercisePR,
   isCompoundExercise,
 };
