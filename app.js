@@ -7,7 +7,7 @@
  */
 
 import { get, put, del, getAll, getAllKeys, putMany, clear } from './db.js';
-import { renderInsightsTab, checkForNewPB } from './insights.js';
+import { checkForNewPB, computeRecentPRs, computePlateaus, getExercisePR } from './insights.js';
 import {
   importFitdaysFile,
   loadBodyComposition,
@@ -189,7 +189,7 @@ const state = {
 
   /** Transient UI state — never written to IndexedDB. */
   ui: {
-    currentView: 'hub',           // 'hub' | 'today' | 'progress' | 'body' | 'plan' | 'insights' | 'data'
+    currentView: 'hub',           // 'hub' | 'today' | 'progress' | 'body' | 'plan' | 'data'
     today: '',                    // 'YYYY-MM-DD'
     weekDates: [],                // [Mon … Sun] date strings for current week
     todayDayIndex: 0,             // 0=Mon … 6=Sun
@@ -812,7 +812,6 @@ function render() {
     case 'progress': renderProgress();     break;
     case 'body':     renderBodyTab(state.bodyComposition); break;
     case 'plan':     renderPlan();         break;
-    case 'insights': renderInsightsTab(state); break;
     case 'data':     renderData();         break;
   }
 }
@@ -1333,17 +1332,6 @@ function getRecentLogsForExercise(exerciseId, excludeDate) {
  * Rep-based exercises rank by heaviest weight; seconds-based exercises rank
  * by longest duration (stored in the `reps` field). Returns null if none.
  */
-function getPRForExercise(exerciseId, unit = 'reps') {
-  const rankField = unit === 'seconds' ? 'reps' : 'weight';
-  const done = state.logs.filter(l =>
-    l.exerciseId === exerciseId && l.done && l[rankField] != null
-  );
-  if (!done.length) return null;
-  return done.reduce((best, l) =>
-    l[rankField] > (best?.[rankField] ?? -Infinity) ? l : best, null
-  );
-}
-
 /** Returns true when every set 0…totalSets-1 has a done=true log on date. */
 function isExerciseComplete(exerciseId, date, totalSets) {
   return Array.from({ length: totalSets }, (_, i) => i)
@@ -1556,32 +1544,6 @@ function findMostRecentSession() {
   return { date, dayPlan, exercises: loggedExercisesOnDate(date) };
 }
 
-/**
- * Recent personal records — a deterministic per-exercise best-set lookup, not
- * analysis. An exercise's all-time best set (heaviest weight, or longest hold
- * for seconds-based work) counts as "recent" when it was set within the window.
- */
-function getRecentPRs(withinDays = 30, limit = 4) {
-  const cutoff = dateStrPlus(state.ui.today, -withinDays);
-  const ids = [...new Set(state.logs.filter(l => l.done).map(l => l.exerciseId))];
-  const prs = [];
-
-  for (const id of ids) {
-    const unit = getExerciseUnit(id);
-    const pr = getPRForExercise(id, unit);
-    if (!pr || pr.date < cutoff) continue;
-    prs.push({
-      id,
-      name: getExerciseName(id),
-      value: unit === 'seconds' ? `${pr.reps}s` : `${pr.weight}kg`,
-      date: pr.date,
-    });
-  }
-
-  prs.sort((a, b) => b.date.localeCompare(a.date));
-  return prs.slice(0, limit);
-}
-
 // ── HUB SECTION BUILDERS ─────────────────────────────────────────────────────
 
 /** Relative label for the next-session date. */
@@ -1769,12 +1731,16 @@ function buildHubTrend(days) {
 }
 
 function buildHubPRs() {
-  const prs = getRecentPRs();
+  // Module 1 — records on the spec metric: estimated-1RM for compounds, top
+  // weight for isolation, longest hold for timed work. Computed in insights.js.
+  const prs = computeRecentPRs(state, { today: state.ui.today });
   const inner = prs.length
     ? prs.map(pr => `
         <div class="hub-pr-row">
           <span class="hub-pr-name">${escHtml(pr.name)}</span>
-          <span class="hub-pr-value">${escHtml(pr.value)}</span>
+          <span class="hub-pr-value">${escHtml(pr.display.value)}${
+            pr.display.note ? ` <span class="hub-pr-metric">${escHtml(pr.display.note)}</span>` : ''
+          }</span>
           <span class="hub-pr-date">${escHtml(friendlyDateLabel(pr.date))}</span>
         </div>`).join('')
     : `<p class="hub-pr-empty">No records in the last month. Log a heavy set to start setting them.</p>`;
@@ -1786,6 +1752,34 @@ function buildHubPRs() {
         ${prs.length ? '<span class="hub-card-meta">last 30 days</span>' : ''}
       </div>
       <div class="hub-pr-list">${inner}</div>
+    </div>`;
+}
+
+/**
+ * Module 2 — exercises with no progression-metric gain across the threshold
+ * window. A factual flag only: which lift, how many sessions flat, and since
+ * when. No suggestion — that reading is Claude's job. Renders nothing (and so
+ * stays out of the way) when there is nothing to flag.
+ */
+function buildHubPlateaus() {
+  const flags = computePlateaus(state);
+  if (!flags.length) return '';
+
+  const rows = flags.map(f => `
+    <div class="hub-pr-row hub-plateau-row">
+      <span class="hub-pr-name">${escHtml(f.name)}</span>
+      <span class="hub-plateau-flag">${f.sessions} sessions</span>
+      <span class="hub-pr-date">since ${escHtml(friendlyDateLabel(f.sinceDate))}</span>
+    </div>`).join('');
+
+  return `
+    <div class="card hub-card hub-plateaus">
+      <div class="hub-card-head">
+        <span class="hub-card-title">Plateaus</span>
+        <span class="hub-card-meta">no recent gain</span>
+      </div>
+      <p class="hub-plateau-note">No estimated-1RM gain on compounds, or volume gain on isolation, across these sessions.</p>
+      <div class="hub-pr-list">${rows}</div>
     </div>`;
 }
 
@@ -1817,6 +1811,7 @@ function renderHub() {
     buildHubBody(days) +
     buildHubTrend(days) +
     buildHubPRs() +
+    buildHubPlateaus() +
     buildHubQuickActions();
 
   wireHub();
@@ -1938,13 +1933,16 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
   const unit      = ex.unit ?? 'reps';
   const isSeconds = unit === 'seconds';
   const prevLogs  = getRecentLogsForExercise(ex.id, date);
-  const pr        = getPRForExercise(ex.id, unit);
+  const pr        = getExercisePR(state, ex.id, { name: ex.name, unit });
   const complete  = isExerciseComplete(ex.id, date, ex.sets);
   const expanded  = state.ui.expandedExerciseId === ex.id;
 
-  // Seconds-based PBs rank by longest hold; rep-based by heaviest weight
+  // PR metric matches the hub: e1RM for compounds, top weight for isolation,
+  // longest hold for timed work — resolved centrally in insights.js.
   const prBadge = pr
-    ? `<span class="ex-pr-badge">PR&nbsp;${isSeconds ? `${pr.reps}s` : `${pr.weight}kg`}</span>`
+    ? `<span class="ex-pr-badge">PR&nbsp;${escHtml(pr.display.value)}${
+        pr.display.note ? `&nbsp;${escHtml(pr.display.note)}` : ''
+      }</span>`
     : '';
 
   const originTag = ex.isAdded
@@ -2320,7 +2318,7 @@ async function handleSetCheck(exerciseId, setIndex, date) {
 
   // Immediate PB surfacing — check the moment a set is marked done, not retroactively
   if (newDone && wVal != null) {
-    const pbMessage = await checkForNewPB(state, exerciseId, getExerciseName(exerciseId), date);
+    const pbMessage = await checkForNewPB(state, exerciseId, getExerciseName(exerciseId), getExerciseUnit(exerciseId), date);
     if (pbMessage) showToast(pbMessage, 4000);
   }
 
@@ -2765,26 +2763,26 @@ function renderExerciseHistory(exerciseId) {
 
   const unit      = getExerciseUnit(exerciseId);
   const isSeconds = unit === 'seconds';
-  const prEntry   = getPRForExercise(exerciseId, unit);
+  // The PR is a session-level record on the spec metric (e1RM / weight / hold);
+  // mark the session that holds it, resolved centrally in insights.js.
+  const prEntry   = getExercisePR(state, exerciseId, { name: getExerciseName(exerciseId), unit });
 
   list.innerHTML = dates.map(dateStr => {
     const entries  = byDate[dateStr];
     const totalSets = entries.length;
     // Seconds-based sessions summarise as longest hold; rep-based as top weight × avg reps
-    let valueTxt, isPR;
+    let valueTxt;
     if (isSeconds) {
       const maxDur = Math.max(...entries.map(l => l.reps ?? 0));
       valueTxt = `best ${maxDur}s · ${totalSets} sets`;
-      isPR     = prEntry && maxDur === prEntry.reps && dateStr === prEntry.date;
     } else {
       const maxWt   = Math.max(...entries.map(l => l.weight ?? 0));
       const avgReps = totalSets
         ? Math.round(entries.reduce((s, l) => s + (l.reps ?? 0), 0) / totalSets)
         : 0;
       valueTxt = `${maxWt}kg × ${avgReps} · ${totalSets} sets`;
-      isPR     = prEntry && maxWt === prEntry.weight && dateStr === prEntry.date;
     }
-    const prTag = isPR ? '<span class="history-row-pr">PR</span>' : '';
+    const prTag = (prEntry && dateStr === prEntry.date) ? '<span class="history-row-pr">PR</span>' : '';
 
     return `
       <div class="history-row">
