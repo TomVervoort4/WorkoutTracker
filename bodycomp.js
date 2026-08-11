@@ -745,6 +745,12 @@ function renderBodyTab(readings) {
   const host = document.getElementById('bc-content');
   if (!host) return;
 
+  // Avoid two identical import actions on the empty page: the centered
+  // empty-state CTA is the single control while empty; the header button
+  // returns once there's data (so further imports stay reachable).
+  const headerImportBtn = document.getElementById('bc-import-btn');
+  if (headerImportBtn) headerImportBtn.hidden = !readings.length;
+
   if (!readings.length) {
     host.innerHTML = buildEmptyState();
     document

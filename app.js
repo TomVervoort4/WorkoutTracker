@@ -3436,6 +3436,13 @@ function buildPlanDayCardHTML(day) {
                aria-label="Session name for ${DAY_NAMES_LONG[day.dayIndex]}"
                data-day="${day.dayIndex}" />
       </div>
+      <div class="plan-exercises-header" aria-hidden="true">
+        <span>Exercise</span>
+        <span>Sets</span>
+        <span>Target</span>
+        <span></span>
+        <span></span>
+      </div>
       <div class="plan-exercises-list" data-day="${day.dayIndex}">
         ${exRows}
       </div>

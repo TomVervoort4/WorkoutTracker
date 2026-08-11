@@ -978,6 +978,26 @@ a { color: var(--color-accent); text-decoration: none; }
   margin-bottom: 8px;
 }
 
+/* Quiet column captions, aligned to the row grid below. Shown only when the
+   day actually has exercise rows (never on an empty/rest day). */
+.plan-exercises-header {
+  display: none;
+  grid-template-columns: 1fr 44px 52px 44px 36px;
+  gap: 6px;
+  padding: 0 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--color-secondary);
+}
+.plan-day-card:has(.plan-exercise-row) .plan-exercises-header {
+  display: grid;
+}
+.plan-exercises-header span:first-child { padding-left: 8px; }
+.plan-exercises-header span:nth-child(2),
+.plan-exercises-header span:nth-child(3) { text-align: center; }
+
 .plan-exercise-row {
   display: grid;
   grid-template-columns: 1fr 44px 52px 44px 36px;
