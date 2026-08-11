@@ -627,10 +627,16 @@ a { color: var(--color-accent); text-decoration: none; }
   color: var(--color-success);
 }
 
-/* Seconds-based sets — extra stopwatch column: set · prev · kg · sec · timer · check */
-.set-row.set-row-seconds,
-.sets-table-header.sets-header-seconds {
-  grid-template-columns: 28px 1fr 60px 60px 36px 44px;
+/* Timed sets — no load column, plus a stopwatch: set · prev · sec · timer · check */
+.set-row.set-row-timed,
+.sets-table-header.sets-header-timed {
+  grid-template-columns: 28px 1fr 72px 36px 44px;
+}
+
+/* Rep-only sets — no load column: set · prev · reps · check */
+.set-row.set-row-repsonly,
+.sets-table-header.sets-header-repsonly {
+  grid-template-columns: 28px 1fr 72px 44px;
 }
 
 .set-timer {
@@ -1811,7 +1817,8 @@ a { color: var(--color-accent); text-decoration: none; }
 .orphan-name-input:focus { border-color: var(--color-accent); }
 .orphan-name-input:disabled { opacity: 0.5; }
 
-.orphan-unit-select {
+.orphan-loadtype-select {
+  flex: 1 1 150px;
   height: 40px;
   background-color: var(--color-surface-2);
   border: 1px solid var(--color-border-muted);
@@ -1821,6 +1828,8 @@ a { color: var(--color-accent); text-decoration: none; }
   font-weight: 600;
   color: var(--color-text);
 }
+
+.orphan-loadtype-select:focus { border-color: var(--color-accent); }
 
 .orphan-archive {
   display: flex;
@@ -2681,13 +2690,6 @@ button.hub-card:hover { border-color: var(--color-border-muted); }
 }
 
 /* ── Plateaus — a factual flag, deliberately quiet (no alarm colour) ───── */
-.hub-plateau-note {
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--color-secondary);
-  margin: -4px 0 2px;
-}
-
 .hub-plateau-flag {
   font-size: 14px;
   font-weight: 700;

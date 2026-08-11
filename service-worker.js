@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v16";
+const CACHE_VERSION = "v18";
 const CACHE_NAME = `fittrack-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -10,6 +10,8 @@ const APP_SHELL = [
   "./bodycomp.js",
   // Vendored SheetJS — precached so Fitdays imports work with no network
   "./vendor/xlsx.full.min.js",
+  // Vendored exercise library — precached so exercise typing works offline
+  "./vendor/exercise-library.json",
   // Self-hosted Inter — precached so the UI renders in its real typeface
   // offline instead of falling back to the system sans
   "./Inter/Inter-VariableFont_opsz,wght.ttf",

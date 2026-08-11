@@ -590,6 +590,112 @@ async function migrateInclineDbLabel() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  EXERCISE LIBRARY + loadType
+//
+//  A vendored, static reference table (vendor/exercise-library.json) pre-tags
+//  common exercises with a `loadType` — the fact that governs how the app
+//  measures, PRs, and progresses each one. This is reference data, not logic:
+//  a pull-up being `bodyweight` is a fact, not a coaching judgement. Types:
+//    weighted   — external load; metric = weight×reps, Epley e1RM applies
+//    bodyweight — load ≈ bodyweight (± added load); metric = reps (unloaded)
+//    assisted   — bodyweight minus machine assist; progression = less assist
+//    timed      — isometric/timed hold; metric = seconds
+//    reps       — rep count, no meaningful external load; metric = reps
+//  The app never computes a bodyweight-adjusted e1RM (that pairing is Claude's).
+// ─────────────────────────────────────────────────────────────────────────────
+
+let EXERCISE_LIBRARY = [];
+const LIBRARY_BY_KEY = new Map(); // normalized name/alias → library entry
+
+/** Normalises a name for matching: lowercase, punctuation → spaces, collapsed. */
+function normalizeExName(name) {
+  return String(name ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/** Loads and indexes the vendored library. Degrades to empty (no matches). */
+async function loadExerciseLibrary() {
+  try {
+    const res = await fetch('./vendor/exercise-library.json');
+    const data = await res.json();
+    EXERCISE_LIBRARY = Array.isArray(data?.exercises) ? data.exercises : [];
+  } catch (err) {
+    console.error('[FitTrack] exercise library failed to load:', err);
+    EXERCISE_LIBRARY = [];
+  }
+  LIBRARY_BY_KEY.clear();
+  for (const entry of EXERCISE_LIBRARY) {
+    LIBRARY_BY_KEY.set(normalizeExName(entry.name), entry);
+    for (const alias of entry.aliases ?? []) LIBRARY_BY_KEY.set(normalizeExName(alias), entry);
+  }
+}
+
+/** The library entry matching an exercise name/alias, or null. */
+function matchLibraryEntry(name) {
+  const key = normalizeExName(name);
+  return key ? (LIBRARY_BY_KEY.get(key) ?? null) : null;
+}
+
+/**
+ * The loadType for an exercise id: an explicitly stored type wins; otherwise a
+ * confident library match by name/alias. Returns null when neither resolves —
+ * an unmatched, untyped exercise is never silently defaulted to `weighted`
+ * (that is exactly what produced phantom pull-up/leg-raise records). Callers
+ * treat null conservatively — reps-based, no e1RM.
+ */
+function getExerciseLoadType(exerciseId) {
+  const def = getExerciseDef(exerciseId);
+  if (def?.loadType) return def.loadType;
+  return def?.name ? (matchLibraryEntry(def.name)?.loadType ?? null) : null;
+}
+
+/**
+ * Stamps `loadType` onto every exercise definition (plan, session swaps,
+ * registry) that a library match resolves, so the type is durable and the
+ * insights engine can read it straight off the catalog. Match-and-preserve:
+ * never touches logged sets, never auto-types an unmatched exercise, never
+ * archives. Also aligns the reps/seconds unit for `timed` entries. No-op once
+ * everything matchable is typed.
+ */
+async function migrateExerciseLoadTypes() {
+  // Returns true only when it actually changed the definition.
+  const applyTo = (ex) => {
+    if (!ex?.name) return false;
+    let changed = false;
+    if (!ex.loadType) {
+      const match = matchLibraryEntry(ex.name);
+      if (match) { ex.loadType = match.loadType; changed = true; } // else: leave untyped
+    }
+    // A timed movement is measured in seconds; keep the unit toggle consistent.
+    if (ex.loadType === 'timed' && ex.unit !== 'seconds') { ex.unit = 'seconds'; changed = true; }
+    return changed;
+  };
+
+  let planDirty = false;
+  for (const day of state.plan?.days ?? []) {
+    for (const ex of day.exercises ?? []) if (applyTo(ex)) planDirty = true;
+  }
+  if (planDirty) await put('plan', state.plan);
+
+  for (const key in state.meta) {
+    if (!key.startsWith('swaps_')) continue;
+    const doc = state.meta[key];
+    let dirty = false;
+    for (const extra of doc?.value ?? []) if (applyTo(extra)) dirty = true;
+    if (dirty) { await put('meta', doc); state.meta[key] = doc; }
+  }
+
+  const regDoc = state.meta[EXERCISE_REGISTRY_KEY];
+  if (regDoc?.value) {
+    let dirty = false;
+    for (const id in regDoc.value) if (applyTo(regDoc.value[id])) dirty = true;
+    if (dirty) { await put('meta', regDoc); state.meta[EXERCISE_REGISTRY_KEY] = regDoc; }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  ORPHAN EXERCISE DETECTION + BACKFILL
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -666,8 +772,10 @@ function orphanHints(id) {
  * registry and stamps `exerciseName`/`unit` onto every existing logged set for
  * that id so history and future exports resolve. Never deletes anything.
  */
-async function backfillOrphanName(id, name, unit, archived = false) {
-  await upsertRegistryEntry(id, { name, unit, archived });
+async function backfillOrphanName(id, name, unit, archived = false, loadType = null) {
+  const entry = { name, unit, archived };
+  if (loadType) entry.loadType = loadType; // omit when unset — never guess a type
+  await upsertRegistryEntry(id, entry);
 
   const affected = state.logs.filter(l => l.exerciseId === id);
   for (const log of affected) {
@@ -709,9 +817,13 @@ function buildOrphanRowHTML(id) {
         <input class="orphan-name-input" type="text"
                placeholder="Real exercise name"
                aria-label="Name for ${escHtml(id)}" />
-        <select class="orphan-unit-select" aria-label="Unit for ${escHtml(id)}">
-          <option value="reps" selected>Reps</option>
-          <option value="seconds">Seconds</option>
+        <select class="orphan-loadtype-select" aria-label="Type for ${escHtml(id)}">
+          <option value="" selected>Type…</option>
+          <option value="weighted">Weighted (kg × reps)</option>
+          <option value="bodyweight">Bodyweight (reps)</option>
+          <option value="assisted">Assisted (less is better)</option>
+          <option value="timed">Timed (seconds)</option>
+          <option value="reps">Reps only</option>
         </select>
         <label class="orphan-archive">
           <input type="checkbox" class="orphan-archive-check" />
@@ -770,14 +882,17 @@ async function saveOrphanReview() {
   for (const row of rows) {
     const id      = row.dataset.orphanId;
     const name    = row.querySelector('.orphan-name-input').value.trim();
-    const unit    = row.querySelector('.orphan-unit-select').value === 'seconds' ? 'seconds' : 'reps';
+    // Type is the primary fact the user assigns; the reps/seconds unit derives
+    // from it. Left unset, the exercise is named but untyped — never guessed.
+    const loadType = row.querySelector('.orphan-loadtype-select').value || null;
+    const unit    = loadType === 'timed' ? 'seconds' : 'reps';
     const doArchive = row.querySelector('.orphan-archive-check').checked;
 
     if (doArchive) {
-      await backfillOrphanName(id, name || 'Archived exercise', unit, true);
+      await backfillOrphanName(id, name || 'Archived exercise', unit, true, loadType);
       archived++;
     } else if (name) {
-      await backfillOrphanName(id, name, unit, false);
+      await backfillOrphanName(id, name, unit, false, loadType);
       named++;
     }
     // else: left blank — untouched, still an orphan for next time.
@@ -974,18 +1089,21 @@ async function init() {
   state.ui.todayDayIndex = dayIndexOf(today);
   state.ui.viewedDate    = today;
 
-  // 2. Pull everything out of IndexedDB
-  await loadState();
+  // 2. Pull everything out of IndexedDB (and the vendored exercise library).
+  await Promise.all([loadState(), loadExerciseLibrary()]);
 
   // 3. Write defaults to the DB on the very first launch
   await seedIfFirstRun();
 
   // 3b. Drop retired streak / Monday-prompt meta, ensure every exercise
-  //     definition has a unit ('reps' | 'seconds'), and correct the stale
-  //     incline-DB label (id preserved, only the name/cue fixed).
+  //     definition has a unit ('reps' | 'seconds'), correct the stale
+  //     incline-DB label (id preserved, only the name/cue fixed), and type
+  //     every library-matched exercise (loadType) so PR/plateau logic branches
+  //     on measurement type instead of the exercise name.
   await dropRetiredMeta();
   await migrateExerciseUnits();
   await migrateInclineDbLabel();
+  await migrateExerciseLoadTypes();
 
   // 4. Bottom tab navigation
   document.querySelectorAll('.nav-tab').forEach(btn => {
@@ -1768,8 +1886,8 @@ function buildHubPlateaus() {
   const rows = flags.map(f => `
     <div class="hub-pr-row hub-plateau-row">
       <span class="hub-pr-name">${escHtml(f.name)}</span>
-      <span class="hub-plateau-flag">${f.sessions} sessions</span>
-      <span class="hub-pr-date">since ${escHtml(friendlyDateLabel(f.sinceDate))}</span>
+      <span class="hub-plateau-flag">no ${escHtml(f.metricLabel)} gain</span>
+      <span class="hub-pr-date">${f.sessions} sessions</span>
     </div>`).join('');
 
   return `
@@ -1778,7 +1896,6 @@ function buildHubPlateaus() {
         <span class="hub-card-title">Plateaus</span>
         <span class="hub-card-meta">no recent gain</span>
       </div>
-      <p class="hub-plateau-note">No estimated-1RM gain on compounds, or volume gain on isolation, across these sessions.</p>
       <div class="hub-pr-list">${rows}</div>
     </div>`;
 }
@@ -1931,9 +2048,24 @@ function renderToday() {
 
 function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
   const unit      = ex.unit ?? 'reps';
-  const isSeconds = unit === 'seconds';
+  const loadType  = ex.loadType ?? getExerciseLoadType(ex.id) ?? (unit === 'seconds' ? 'timed' : 'reps');
+  const isTimed   = loadType === 'timed';
+  const isSeconds = isTimed; // effort is measured in seconds for timed work
+  const effortUnit = isTimed ? 'seconds' : 'reps';
+  // Per-type load column: weighted logs external weight, bodyweight an optional
+  // added load, assisted the machine assistance. Timed and rep-only work show
+  // no load column at all — reusing the `weight` field per its loadType.
+  const LOAD_COLUMNS = {
+    weighted:   { label: 'kg',     placeholder: 'kg',  aria: 'Weight kg' },
+    bodyweight: { label: '+kg',    placeholder: '+kg', aria: 'Added load kg' },
+    assisted:   { label: 'Assist', placeholder: '−kg', aria: 'Assistance kg' },
+  };
+  const loadCol   = LOAD_COLUMNS[loadType] ?? null;
+  const hasLoad   = !!loadCol;
+  const rowVariant = hasLoad ? '' : (isTimed ? ' set-row-timed' : ' set-row-repsonly');
+  const headVariant = hasLoad ? '' : (isTimed ? ' sets-header-timed' : ' sets-header-repsonly');
   const prevLogs  = getRecentLogsForExercise(ex.id, date);
-  const pr        = getExercisePR(state, ex.id, { name: ex.name, unit });
+  const pr        = getExercisePR(state, ex.id, { name: ex.name, unit, loadType });
   const complete  = isExerciseComplete(ex.id, date, ex.sets);
   const expanded  = state.ui.expandedExerciseId === ex.id;
 
@@ -1953,22 +2085,26 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
 
   const disabledAttr = readOnly ? 'disabled' : '';
 
+  // The "Previous" reference reads per loadType: weighted 'kg×reps', bodyweight
+  // '+kg×reps' (or bare reps when unloaded), assisted '−kg×reps', timed '45s',
+  // rep-only bare reps.
+  const prevRef = (prev) => {
+    if (!prev) return '—';
+    const r = prev.reps ?? '?';
+    if (isTimed) return formatEffort(prev.reps, 'seconds');
+    if (loadType === 'weighted')   return `${prev.weight ?? '?'}×${r}`;
+    if (loadType === 'bodyweight') return prev.weight != null ? `+${prev.weight}×${r}` : `${r} reps`;
+    if (loadType === 'assisted')   return prev.weight != null ? `−${prev.weight}×${r}` : `${r} reps`;
+    return `${r} reps`;
+  };
+
   const setsRows = Array.from({ length: ex.sets }, (_, i) => {
     const log   = getExistingLog(date, ex.id, i);
     const prev  = prevLogs.find(l => l.setIndex === i);
-    // Duration exercises show '45s' (with '20×45s' if the hold was weighted);
-    // rep exercises keep the classic 'kg×reps' reference.
-    const prevTxt = !prev
-      ? '—'
-      : isSeconds
-        ? (prev.weight != null
-            ? `${prev.weight}×${formatEffort(prev.reps, unit)}`
-            : formatEffort(prev.reps, unit))
-        : `${prev.weight ?? '?'}×${prev.reps ?? '?'}`;
-    const done = log?.done ?? false;
+    const done  = log?.done ?? false;
 
-    // Duration sets get a start/stop timer that fills the seconds input
-    const timerBtn = isSeconds ? `
+    // Timed sets get a start/stop timer that fills the seconds input
+    const timerBtn = isTimed ? `
         <button class="set-timer"
                 aria-label="Start timer for set ${i + 1}"
                 aria-pressed="false"
@@ -1979,23 +2115,27 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
           </svg>
         </button>` : '';
 
-    return `
-      <div class="set-row${isSeconds ? ' set-row-seconds' : ''}${done ? ' set-logged' : ''}"
-           data-ex-id="${escHtml(ex.id)}" data-set-index="${i}">
-        <span class="set-num">${i + 1}</span>
-        <span class="set-prev">${escHtml(prevTxt)}</span>
+    // Load input only for loaded types (weighted / bodyweight / assisted).
+    const loadInput = hasLoad ? `
         <input class="set-input set-weight"
                type="number" inputmode="decimal" step="0.5" min="0"
-               placeholder="kg"
+               placeholder="${escHtml(loadCol.placeholder)}"
                value="${log?.weight ?? ''}"
-               aria-label="Weight kg, set ${i + 1}"
+               aria-label="${escHtml(loadCol.aria)}, set ${i + 1}"
                data-field="weight" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
-               ${disabledAttr} />
+               ${disabledAttr} />` : '';
+
+    return `
+      <div class="set-row${rowVariant}${done ? ' set-logged' : ''}"
+           data-ex-id="${escHtml(ex.id)}" data-set-index="${i}">
+        <span class="set-num">${i + 1}</span>
+        <span class="set-prev">${escHtml(prevRef(prev))}</span>
+        ${loadInput}
         <input class="set-input set-reps"
                type="number" inputmode="numeric" min="1"
                placeholder="${escHtml(String(ex.reps))}"
                value="${log?.reps ?? ''}"
-               aria-label="${isSeconds ? 'Seconds' : 'Reps'}, set ${i + 1}"
+               aria-label="${isTimed ? 'Seconds' : 'Reps'}, set ${i + 1}"
                data-field="reps" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
                ${disabledAttr} />
         ${timerBtn}
@@ -2046,7 +2186,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
           </svg>
         </span>
         <span class="exercise-name">${escHtml(ex.name)}</span>
-        <span class="exercise-summary">${ex.sets}×${escHtml(formatEffort(ex.reps, unit))}</span>
+        <span class="exercise-summary">${ex.sets}×${escHtml(formatEffort(ex.reps, effortUnit))}</span>
         ${originTag}
         ${prBadge}
         <svg class="chevron-icon" width="16" height="16" viewBox="0 0 24 24"
@@ -2058,9 +2198,10 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
       <div class="exercise-body${expanded ? ' expanded' : ''}">
         ${metaBlock}
         <div class="sets-table">
-          <div class="sets-table-header${isSeconds ? ' sets-header-seconds' : ''}">
-            <span>Set</span><span>Previous</span><span>kg</span>
-            <span>${isSeconds ? 'Sec' : 'Reps'}</span>${isSeconds ? '<span></span>' : ''}<span></span>
+          <div class="sets-table-header${headVariant}">
+            <span>Set</span><span>Previous</span>
+            ${hasLoad ? `<span>${escHtml(loadCol.label)}</span>` : ''}
+            <span>${isTimed ? 'Sec' : 'Reps'}</span>${isTimed ? '<span></span>' : ''}<span></span>
           </div>
           ${setsRows}
         </div>
@@ -2282,6 +2423,12 @@ async function handleSetCheck(exerciseId, setIndex, date) {
 
   const { allExercises: allPlannedEx } = resolveExercisesForDate(date);
   const exDef = allPlannedEx.find(e => e.id === exerciseId);
+  const loadType = getExerciseLoadType(exerciseId)
+    ?? (getExerciseUnit(exerciseId) === 'seconds' ? 'timed' : 'reps');
+  // Weight is a meaningful, repeating input only for these two types; for
+  // bodyweight/reps/timed the `weight` field is optional load (or unused), so
+  // it must not be auto-filled — that would re-leak a prior value into it.
+  const loadIsMeaningful = loadType === 'weighted' || loadType === 'assisted';
 
   // Read the live DOM inputs before saving so unsaved keystrokes aren't lost
   const setRow = document.querySelector(
@@ -2306,7 +2453,7 @@ async function handleSetCheck(exerciseId, setIndex, date) {
       .filter(l => l.exerciseId === exerciseId && l.date === date && l.done && l.setIndex !== setIndex)
       .sort((a, b) => a.setIndex - b.setIndex);
     const sameDay = sameDaySets[sameDaySets.length - 1] ?? null;
-    if (wVal == null) wVal = sameDay?.weight ?? prev?.weight ?? null;
+    if (wVal == null && loadIsMeaningful) wVal = sameDay?.weight ?? prev?.weight ?? null;
     if (rVal == null) rVal = sameDay?.reps ?? prev?.reps ?? (parseInt(exDef?.reps, 10) || null);
   }
 
@@ -2316,9 +2463,11 @@ async function handleSetCheck(exerciseId, setIndex, date) {
   if (newDone) startRestTimer();
   else stopRestTimer();
 
-  // Immediate PB surfacing — check the moment a set is marked done, not retroactively
-  if (newDone && wVal != null) {
-    const pbMessage = await checkForNewPB(state, exerciseId, getExerciseName(exerciseId), getExerciseUnit(exerciseId), date);
+  // Immediate PB surfacing — check the moment a set is marked done. A record is
+  // rankable whenever the effort (reps or seconds) is present; weight is only
+  // required for weighted work, which checkForNewPB handles per loadType.
+  if (newDone && rVal != null) {
+    const pbMessage = await checkForNewPB(state, exerciseId, getExerciseName(exerciseId), loadType, date);
     if (pbMessage) showToast(pbMessage, 4000);
   }
 
@@ -2762,25 +2911,33 @@ function renderExerciseHistory(exerciseId) {
   }
 
   const unit      = getExerciseUnit(exerciseId);
-  const isSeconds = unit === 'seconds';
-  // The PR is a session-level record on the spec metric (e1RM / weight / hold);
+  const loadType  = getExerciseLoadType(exerciseId) ?? (unit === 'seconds' ? 'timed' : 'reps');
+  // The PR is a session-level record on this exercise's metric (per loadType);
   // mark the session that holds it, resolved centrally in insights.js.
-  const prEntry   = getExercisePR(state, exerciseId, { name: getExerciseName(exerciseId), unit });
+  const prEntry   = getExercisePR(state, exerciseId, { name: getExerciseName(exerciseId), unit, loadType });
 
   list.innerHTML = dates.map(dateStr => {
     const entries  = byDate[dateStr];
     const totalSets = entries.length;
-    // Seconds-based sessions summarise as longest hold; rep-based as top weight × avg reps
+    // Each session summarises on its own metric — no kg where load isn't the
+    // point (a bodyweight pull-up reads in reps, not the weight field).
+    const maxReps = Math.max(...entries.map(l => l.reps ?? 0));
     let valueTxt;
-    if (isSeconds) {
-      const maxDur = Math.max(...entries.map(l => l.reps ?? 0));
-      valueTxt = `best ${maxDur}s · ${totalSets} sets`;
-    } else {
+    if (loadType === 'timed') {
+      valueTxt = `best ${maxReps}s · ${totalSets} sets`;
+    } else if (loadType === 'weighted') {
       const maxWt   = Math.max(...entries.map(l => l.weight ?? 0));
       const avgReps = totalSets
         ? Math.round(entries.reduce((s, l) => s + (l.reps ?? 0), 0) / totalSets)
         : 0;
       valueTxt = `${maxWt}kg × ${avgReps} · ${totalSets} sets`;
+    } else if (loadType === 'assisted') {
+      const assists = entries.map(l => l.weight).filter(w => w != null);
+      valueTxt = assists.length
+        ? `${Math.min(...assists)}kg assist · ${totalSets} sets`
+        : `${maxReps} reps · ${totalSets} sets`;
+    } else { // bodyweight or rep-only — headline is reps
+      valueTxt = `${maxReps} reps · ${totalSets} sets`;
     }
     const prTag = (prEntry && dateStr === prEntry.date) ? '<span class="history-row-pr">PR</span>' : '';
 
@@ -3383,6 +3540,7 @@ async function handleImport(event) {
         await dropRetiredMeta();
         await migrateExerciseUnits();
         await migrateInclineDbLabel();
+        await migrateExerciseLoadTypes();
         state.ui.viewedDate = state.ui.today;
         render();
 

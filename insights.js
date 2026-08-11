@@ -11,11 +11,19 @@
  * logs in always produce the same results out. Card rendering in the house
  * style lives in app.js; this module only answers "what is true".
  *
- * Current batch (of the phased Phase 3 rollout):
- *   Module 1 — PR highlighting
- *   Module 2 — Plateau detection
- * Later modules (progression trend, weekly volume, consistency, shared-axis
- * bodyweight/strength, note co-location) arrive as their own increments.
+ * Measurement is governed by each exercise's `loadType` (assigned from the
+ * vendored exercise library / user typing, resolved in app.js), NOT by its
+ * name. This is the fix for phantom records — a pull-up is `bodyweight`, so it
+ * PRs on reps, and no meaningless kg estimate is ever computed for it:
+ *   weighted   → estimated 1RM (Epley) on the top set
+ *   bodyweight → reps (unloaded); loaded-set e1RM is Claude's, not the app's
+ *   assisted   → progression is LESS assistance (or more reps at same assist)
+ *   timed      → seconds (longest hold)
+ *   reps       → rep count
+ * An unknown/untyped exercise is treated conservatively as rep-based — never
+ * weighted — so it can never fabricate a kg record.
+ *
+ * Current batch: Module 1 (PR highlighting) + Module 2 (plateau detection).
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,26 +36,45 @@ const EPLEY_REPS_DIVISOR = 30;          // e1RM = weight × (1 + reps / 30)
 const RECENT_PR_WINDOW_DAYS = 30;       // a PR counts as "recent" within this window
 const RECENT_PR_LIMIT       = 5;        // most recent PRs surfaced on the hub
 
-// Module 2 — plateau detection ("no improvement across N logged sessions")
-const COMPOUND_PLATEAU_SESSIONS  = 3;   // compounds tracked by estimated 1RM
-const ISOLATION_PLATEAU_SESSIONS = 4;   // isolation tracked by total volume
+// Module 2 — plateau detection ("no improvement across N logged sessions").
+// The metric watched is set by loadType; the cadence (how many flat sessions)
+// still follows the compound/isolation split.
+const COMPOUND_PLATEAU_SESSIONS  = 3;
+const ISOLATION_PLATEAU_SESSIONS = 4;
 const PLATEAU_LIMIT              = 6;    // most stale exercises surfaced at once
 
-// Floating-point guard so an identical e1RM counts as "no improvement", not a gain.
+// How each type's plateau reads in a sentence ("no ___ gain in N sessions").
+const PLATEAU_METRIC_LABELS = {
+  weighted:   'estimated-1RM',
+  bodyweight: 'reps',
+  reps:       'reps',
+  timed:      'hold-time',
+  assisted:   'assistance',
+};
+
+// Floating-point guard so an identical metric counts as "no improvement".
 const IMPROVEMENT_EPSILON = 1e-6;
 
-// Compound lifts progress by load (estimated 1RM); everything else by weight/volume.
+// Assisted progression is "lower assistance is better"; this scale lets a single
+// comparable number express "less assist, ties broken by more reps".
+const ASSIST_WEIGHT = 1000;
+
+// Compound movements plateau on a shorter cadence than isolation ones. This
+// keyword split ONLY chooses 3-vs-4 sessions — it never decides the metric
+// (that is loadType's job), so its failure mode is at most a one-session-off
+// threshold, never a phantom record.
 const COMPOUND_NAME_KEYWORDS = [
   'bench press', 'squat', 'overhead press', 'romanian deadlift', 'deadlift',
-  'pull-up', 'pullup', 'pull up', 'lat pulldown', 'row', 'leg press',
+  'pull-up', 'pullup', 'pull up', 'chin-up', 'chinup', 'row', 'dip',
+  'clean', 'snatch', 'press', 'lat pulldown', 'leg press',
 ];
 const ISOLATION_NAME_KEYWORDS = [
-  'curl', 'pushdown', 'push-down', 'face pull', 'calf raise',
+  'curl', 'pushdown', 'push-down', 'face pull', 'calf raise', 'extension',
   'external rotation', 'rear delt', 'fly', 'pull-apart', 'pull apart', 'raise',
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SMALL LOCAL UTILITIES (kept self-contained — insights.js has no app.js deps)
+//  SMALL LOCAL UTILITIES (self-contained — insights.js has no app.js deps)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function round1(n) {
@@ -64,11 +91,12 @@ function addDays(dateStr, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  EXERCISE CLASSIFICATION
-// ─────────────────────────────────────────────────────────────────────────────
+function epley1RM(weight, reps) {
+  if (weight == null || reps == null || reps <= 0) return null;
+  return weight * (1 + reps / EPLEY_REPS_DIVISOR);
+}
 
-/** True when a rep-based exercise should be tracked by estimated 1RM. */
+/** True when a name suggests a compound movement (used only for plateau cadence). */
 function isCompoundExercise(name) {
   const n = (name ?? '').toLowerCase();
   if (ISOLATION_NAME_KEYWORDS.some(k => n.includes(k))) return false;
@@ -76,26 +104,26 @@ function isCompoundExercise(name) {
   return false;
 }
 
-/**
- * Resolves how one exercise is measured. Seconds-based holds (isometrics) are
- * never "compound" — an e1RM off a hold duration would be meaningless.
- */
-function classify(name, unit) {
-  const isSeconds = unit === 'seconds';
-  return { isSeconds, isCompound: !isSeconds && isCompoundExercise(name) };
+/** The measurement type to use, defaulting untyped exercises to safe rep-based. */
+function effectiveLoadType(ex) {
+  if (ex?.loadType) return ex.loadType;
+  if (ex?.unit === 'seconds') return 'timed';
+  return 'reps'; // conservative — never weighted, so never a phantom kg record
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  EXERCISE CATALOG (id → {id, name, unit})
-//  Built from the same three sources app.js resolves names from: the recurring
-//  plan, per-session swaps/adds, and the orphan registry.
+//  EXERCISE CATALOG (id → {id, name, unit, loadType})
+//  Built from the same three sources app.js resolves from: the recurring plan,
+//  per-session swaps/adds, and the orphan registry.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildExerciseCatalog(plan, meta) {
   const catalog = new Map();
   const add = (ex) => {
     if (!ex?.id || !ex.name) return;
-    catalog.set(ex.id, { id: ex.id, name: ex.name, unit: ex.unit ?? 'reps' });
+    catalog.set(ex.id, {
+      id: ex.id, name: ex.name, unit: ex.unit ?? 'reps', loadType: ex.loadType ?? null,
+    });
   };
 
   if (plan) {
@@ -117,116 +145,104 @@ function buildExerciseCatalog(plan, meta) {
 //  METRIC HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-function epley1RM(weight, reps) {
-  if (weight == null || reps == null || reps <= 0) return null;
-  return weight * (1 + reps / EPLEY_REPS_DIVISOR);
-}
-
-/** Completed, fully-numbered sets for one exercise on one date. */
+/** Completed sets for one exercise on one date. Gate is reps present (reps or
+ *  seconds); weight is optional, since bodyweight/timed/rep work carries none. */
 function doneSets(logs, exerciseId, date) {
   return logs.filter(l =>
-    l.exerciseId === exerciseId && l.date === date && l.done &&
-    l.weight != null && l.reps != null
+    l.exerciseId === exerciseId && l.date === date && l.done && l.reps != null
   );
 }
 
 /** Every date (oldest first) this exercise has at least one completed set. */
 function distinctDates(logs, exerciseId) {
   return [...new Set(
-    logs
-      .filter(l => l.exerciseId === exerciseId && l.done && l.weight != null && l.reps != null)
-      .map(l => l.date)
+    logs.filter(l => l.exerciseId === exerciseId && l.done && l.reps != null).map(l => l.date)
   )].sort();
 }
 
+/** The set maximising sel(set), with its value, or null. */
+function bestBy(sets, sel) {
+  let best = null;
+  let bestVal = -Infinity;
+  for (const s of sets) {
+    const v = sel(s);
+    if (v != null && v > bestVal) { bestVal = v; best = s; }
+  }
+  return best ? { set: best, value: bestVal } : null;
+}
+
 /**
- * PR metric for one session's sets (module 1):
- *   seconds  → longest single hold
- *   compound → best set's estimated 1RM
- *   else     → heaviest single set
- * Returns { value, weight, reps } or null. `value` is what a PR ranks on.
+ * The record metric for one session's sets, by loadType. Returns
+ * { value, weight, reps } where `value` is what a PR/plateau ranks on and
+ * weight/reps carry the achieving set for display. Null when unrankable.
  */
-function prSessionMetric(sets, kind) {
+function sessionMetric(sets, loadType) {
   if (!sets.length) return null;
 
-  if (kind.isSeconds) {
-    const best = sets.reduce((b, s) => (s.reps > (b?.reps ?? -Infinity) ? s : b), null);
-    return { value: best.reps, weight: best.weight, reps: best.reps };
-  }
-  if (kind.isCompound) {
-    let best = null;
-    for (const s of sets) {
-      const e = epley1RM(s.weight, s.reps);
-      if (e != null && (best == null || e > best.value)) {
-        best = { value: e, weight: s.weight, reps: s.reps };
-      }
+  switch (loadType) {
+    case 'weighted': {
+      const b = bestBy(sets, s => epley1RM(s.weight, s.reps));
+      return b && { value: b.value, weight: b.set.weight, reps: b.set.reps };
     }
-    return best;
+    case 'timed': {
+      // Seconds live in the reps field for timed work.
+      const b = bestBy(sets, s => s.reps);
+      return b && { value: b.value, weight: null, reps: b.set.reps };
+    }
+    case 'assisted': {
+      // Lower assistance is better; ties broken by more reps at that assist.
+      const assists = sets.map(s => s.weight).filter(w => w != null);
+      if (!assists.length) return null;
+      const minAssist = Math.min(...assists);
+      const reps = Math.max(...sets.filter(s => s.weight === minAssist).map(s => s.reps ?? 0));
+      return { value: -minAssist * ASSIST_WEIGHT + reps, weight: minAssist, reps };
+    }
+    case 'bodyweight':
+    case 'reps':
+    default: {
+      // Unloaded progression is reps. (Loaded-bodyweight e1RM is Claude's job.)
+      const b = bestBy(sets, s => s.reps);
+      return b && { value: b.value, weight: b.set.weight, reps: b.set.reps };
+    }
   }
-  const best = sets.reduce((b, s) => (s.weight > (b?.weight ?? -Infinity) ? s : b), null);
-  return { value: best.weight, weight: best.weight, reps: best.reps };
 }
 
-/**
- * Progression metric for plateau detection (module 2):
- *   compound → best set's estimated 1RM
- *   else     → total session volume (Σ weight × reps)
- * Seconds-based holds are excluded from plateau detection entirely.
- */
-function plateauSessionMetric(sets, kind) {
-  if (!sets.length || kind.isSeconds) return null;
-  if (kind.isCompound) {
-    let best = null;
-    for (const s of sets) {
-      const e = epley1RM(s.weight, s.reps);
-      if (e != null && (best == null || e > best)) best = e;
-    }
-    return best;
-  }
-  return sets.reduce((sum, s) => sum + s.weight * s.reps, 0);
-}
-
-/** All-time best PR for one exercise (set-level value + the date holding it), or null. */
+/** All-time best PR for one exercise (the achieving session), or null. */
 function exercisePR(logs, ex) {
-  const kind = classify(ex.name, ex.unit);
+  const loadType = effectiveLoadType(ex);
   let best = null;
   for (const date of distinctDates(logs, ex.id)) {
-    const m = prSessionMetric(doneSets(logs, ex.id, date), kind);
+    const m = sessionMetric(doneSets(logs, ex.id, date), loadType);
     if (m && (best == null || m.value > best.value)) best = { ...m, date };
   }
   if (!best) return null;
   return {
-    id: ex.id,
-    name: ex.name,
-    unit: ex.unit,
-    kind,
-    date: best.date,
-    value: best.value,
-    weight: best.weight,
-    reps: best.reps,
+    id: ex.id, name: ex.name, unit: ex.unit, loadType,
+    date: best.date, value: best.value, weight: best.weight, reps: best.reps,
   };
 }
 
-/** Formats a PR's headline value for display, with an optional metric qualifier. */
+/** Formats a PR's headline value by loadType, with an optional qualifier note. */
 function prDisplay(pr) {
-  if (pr.kind.isSeconds) return { value: `${pr.reps}s`, note: '' };
-  if (pr.kind.isCompound) return { value: `${round1(pr.value)}kg`, note: 'e1RM' };
-  return { value: `${pr.weight}kg`, note: '' };
+  switch (pr.loadType) {
+    case 'weighted':   return { value: `${round1(pr.value)}kg`, note: 'e1RM' };
+    case 'timed':      return { value: `${pr.reps}s`, note: '' };
+    case 'assisted':   return { value: `${pr.weight}kg`, note: 'assist' };
+    case 'bodyweight':
+    case 'reps':
+    default:           return { value: `${pr.reps} reps`, note: '' };
+  }
 }
 
 /**
- * Logged sessions since this series last set a new high — i.e. how many
- * sessions of "no improvement" trail the last record. A brand-new high resets
- * the count to zero.
+ * Logged sessions since this series last set a new high — how many sessions of
+ * "no improvement" trail the last record. A new high resets the count to zero.
  */
 function sessionsSinceImprovement(series) {
   let runningMax = -Infinity;
   let lastImprovement = -1;
   series.forEach((v, i) => {
-    if (v > runningMax + IMPROVEMENT_EPSILON) {
-      runningMax = v;
-      lastImprovement = i;
-    }
+    if (v > runningMax + IMPROVEMENT_EPSILON) { runningMax = v; lastImprovement = i; }
   });
   return (series.length - 1) - lastImprovement;
 }
@@ -236,21 +252,20 @@ function sessionsSinceImprovement(series) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Module 1 — the current all-time PR for a single exercise, or null.
- * app.js passes the name/unit it already knows so the hot log-render path
- * doesn't rebuild the whole catalog. Used for the Today badge and to mark the
- * record session in per-exercise history.
+ * Module 1 — the current all-time PR for a single exercise, or null. app.js
+ * passes the {name, unit, loadType} it already knows so the log-render hot path
+ * doesn't rebuild the catalog. Used for the Today badge and history marking.
  */
-function getExercisePR(state, exerciseId, { name = '', unit = 'reps' } = {}) {
-  const pr = exercisePR(state.logs, { id: exerciseId, name, unit });
+function getExercisePR(state, exerciseId, { name = '', unit = 'reps', loadType = null } = {}) {
+  const pr = exercisePR(state.logs, { id: exerciseId, name, unit, loadType });
   if (!pr) return null;
   return { ...pr, display: prDisplay(pr) };
 }
 
 /**
  * Module 1 — recent PRs across every known exercise, newest first, for the hub.
- * A PR is simply "highest value to date for this exercise on its metric"; it is
- * "recent" when that record was set within the window.
+ * A PR is "highest value to date on this exercise's metric"; it is "recent"
+ * when that record was set within the window.
  */
 function computeRecentPRs(state, { today, withinDays = RECENT_PR_WINDOW_DAYS, limit = RECENT_PR_LIMIT } = {}) {
   const cutoff = today ? addDays(today, -withinDays) : '';
@@ -268,9 +283,9 @@ function computeRecentPRs(state, { today, withinDays = RECENT_PR_WINDOW_DAYS, li
 }
 
 /**
- * Module 2 — exercises whose progression metric hasn't improved across the
- * threshold number of sessions. Output is a factual flag only: the exercise,
- * how many sessions have passed without a gain, and the date of the last one.
+ * Module 2 — exercises whose progression metric (set by loadType) hasn't
+ * improved across the threshold number of sessions. A factual flag only: the
+ * exercise, how many sessions without a gain, and the date of the last record.
  * No suggestion, no cause — those belong to the analysis layer.
  */
 function computePlateaus(state, { limit = PLATEAU_LIMIT } = {}) {
@@ -278,29 +293,28 @@ function computePlateaus(state, { limit = PLATEAU_LIMIT } = {}) {
 
   const flags = [];
   for (const ex of catalog.values()) {
-    const kind = classify(ex.name, ex.unit);
-    if (kind.isSeconds) continue; // holds aren't a load-progression concept here
+    const loadType = effectiveLoadType(ex);
+    const threshold = isCompoundExercise(ex.name) ? COMPOUND_PLATEAU_SESSIONS : ISOLATION_PLATEAU_SESSIONS;
 
-    const threshold = kind.isCompound ? COMPOUND_PLATEAU_SESSIONS : ISOLATION_PLATEAU_SESSIONS;
     const dates = distinctDates(state.logs, ex.id);
-    // Need a baseline session plus `threshold` flat ones to say "no gain in N".
-    if (dates.length < threshold + 1) continue;
+    if (dates.length < threshold + 1) continue; // need a baseline + N flat sessions
 
-    const series = dates.map(d => plateauSessionMetric(doneSets(state.logs, ex.id, d), kind));
+    const series = dates.map(d => sessionMetric(doneSets(state.logs, ex.id, d), loadType)?.value);
+    if (series.some(v => v == null)) continue; // an unrankable session — skip, don't guess
+
     const stale = sessionsSinceImprovement(series);
     if (stale < threshold) continue;
 
     flags.push({
       id: ex.id,
       name: ex.name,
-      metric: kind.isCompound ? 'e1rm' : 'volume',
-      metricLabel: kind.isCompound ? 'estimated-1RM' : 'volume',
+      loadType,
+      metricLabel: PLATEAU_METRIC_LABELS[loadType] ?? 'progress',
       sessions: stale,
       sinceDate: dates[dates.length - 1 - stale], // date of the last record
     });
   }
 
-  // Most stale first — the ones flat the longest lead.
   flags.sort((a, b) => b.sessions - a.sessions || b.sinceDate.localeCompare(a.sinceDate));
   return flags.slice(0, limit);
 }
@@ -310,25 +324,29 @@ function computePlateaus(state, { limit = PLATEAU_LIMIT } = {}) {
  * all-time PR for the exercise? Returns a facts-only message for a toast, or
  * null. States the record and its numbers; it does not coach.
  */
-function checkForNewPB(state, exerciseId, exerciseName, exerciseUnit, date) {
-  const kind = classify(exerciseName, exerciseUnit);
-  const todayMetric = prSessionMetric(doneSets(state.logs, exerciseId, date), kind);
+function checkForNewPB(state, exerciseId, exerciseName, loadType, date) {
+  const kind = loadType || 'reps';
+  const todayMetric = sessionMetric(doneSets(state.logs, exerciseId, date), kind);
   if (!todayMetric) return null;
 
-  // Best across every other session — today only counts if it beats all of them.
   let prevBest = null;
   for (const d of distinctDates(state.logs, exerciseId)) {
     if (d === date) continue;
-    const m = prSessionMetric(doneSets(state.logs, exerciseId, d), kind);
+    const m = sessionMetric(doneSets(state.logs, exerciseId, d), kind);
     if (m && (prevBest == null || m.value > prevBest.value)) prevBest = m;
   }
   if (prevBest && todayMetric.value <= prevBest.value + IMPROVEMENT_EPSILON) return null;
 
-  if (kind.isSeconds) return `New PR · ${exerciseName}: ${todayMetric.reps}s hold`;
-  if (kind.isCompound) {
-    return `New PR · ${exerciseName}: ${round1(todayMetric.value)}kg e1RM (${todayMetric.weight}kg × ${todayMetric.reps})`;
+  switch (kind) {
+    case 'weighted':
+      return `New PR · ${exerciseName}: ${round1(todayMetric.value)}kg e1RM (${todayMetric.weight}kg × ${todayMetric.reps})`;
+    case 'timed':
+      return `New PR · ${exerciseName}: ${todayMetric.reps}s hold`;
+    case 'assisted':
+      return `New PR · ${exerciseName}: ${todayMetric.weight}kg assist × ${todayMetric.reps}`;
+    default:
+      return `New PR · ${exerciseName}: ${todayMetric.reps} reps`;
   }
-  return `New PR · ${exerciseName}: ${todayMetric.weight}kg`;
 }
 
 export {
