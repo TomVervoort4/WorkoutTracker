@@ -2704,10 +2704,154 @@ function buildKnownExerciseList() {
 }
 
 /**
+ * Ranked exercise suggestions for a typed query — the single source of truth
+ * for both the session add dialog and the plan editor's exercise rows. Draws
+ * from the vendored library (matched on name + aliases, carrying loadType,
+ * defaultUnit and muscles) and the user's previously-used exercises (carrying
+ * their id, so history re-attaches). Deduped by name: a previously-used
+ * exercise wins over the library entry of the same name, preserving its id and
+ * history. Ranked exact → prefix → mid-string, then alphabetical.
+ */
+function exerciseSuggestionProvider(query) {
+  const q = normalizeExName(query);
+  if (!q) return [];
+
+  const rankOf = (text) => {
+    const n = normalizeExName(text);
+    const i = n.indexOf(q);
+    return i < 0 ? Infinity : (n === q ? 0 : i === 0 ? 1 : 2);
+  };
+  const firstMuscle = (m) => (m ?? '').split('·')[0].trim();
+  const hintOf = (muscle, loadType) => [muscle, loadType].filter(Boolean).join(' · ');
+
+  const byName = new Map();
+
+  // Previously-used exercises first — they carry an id (and thus history).
+  for (const k of buildKnownExerciseList()) {
+    const r = rankOf(k.name);
+    if (r === Infinity) continue;
+    const loadType = getExerciseLoadType(k.id);
+    byName.set(normalizeExName(k.name), {
+      name: k.name,
+      hint: hintOf(firstMuscle(k.muscles), loadType) || `${k.sets}×${formatEffort(k.reps, k.unit ?? 'reps')}`,
+      def: { id: k.id, name: k.name, unit: k.unit ?? 'reps', sets: k.sets, reps: k.reps, loadType, muscles: k.muscles ?? '', source: 'known' },
+      _rank: r,
+    });
+  }
+
+  // Library entries — added only when a same-named known exercise isn't present.
+  for (const e of EXERCISE_LIBRARY) {
+    let r = rankOf(e.name);
+    for (const a of e.aliases ?? []) r = Math.min(r, rankOf(a));
+    if (r === Infinity) continue;
+    const key = normalizeExName(e.name);
+    if (byName.has(key)) continue; // known one wins (keeps id/history)
+    byName.set(key, {
+      name: e.name,
+      hint: hintOf(e.primaryMuscle, e.loadType),
+      def: {
+        id: null, name: e.name,
+        unit: e.defaultUnit === 'seconds' ? 'seconds' : 'reps',
+        sets: null, reps: null,
+        loadType: e.loadType,
+        muscles: [e.primaryMuscle, ...(e.secondaryMuscles ?? [])].filter(Boolean).join(' · '),
+        source: 'library',
+      },
+      _rank: r,
+    });
+  }
+
+  return [...byName.values()].sort((a, b) => a._rank - b._rank || a.name.localeCompare(b.name));
+}
+
+/**
+ * Attaches a type-ahead dropdown to an exercise-name input — the one picker
+ * implementation, used at both entry points (session dialog + plan editor).
+ * `provider(query)` returns ranked { name, hint, def } suggestions; `onSelect`
+ * receives { def } for a chosen suggestion or { isNew: true, name } for the
+ * free-entry "add as custom" path. Keyboard (↑/↓/Enter/Esc) and touch both
+ * work; the list opens upward when there isn't room below; `container` must be
+ * position:relative so the list anchors to the field.
+ */
+function attachExerciseAutocomplete(input, { provider, onSelect, container, limit = 8 }) {
+  container = container || input.parentElement;
+  const list = document.createElement('div');
+  list.className = 'autocomplete-list';
+  list.hidden = true;
+  container.appendChild(list);
+
+  let items = [];
+  let active = -1;
+
+  const close = () => {
+    list.hidden = true; list.innerHTML = ''; items = []; active = -1;
+    input.setAttribute('aria-expanded', 'false');
+  };
+
+  const setActive = (i) => {
+    active = i;
+    list.querySelectorAll('.autocomplete-item').forEach((el, idx) => {
+      const on = idx === active;
+      el.classList.toggle('autocomplete-item-active', on);
+      if (on) el.scrollIntoView({ block: 'nearest' });
+    });
+  };
+
+  const pick = (i) => {
+    const item = items[i];
+    if (!item) return;
+    if (item.isNew) onSelect({ isNew: true, name: item.name });
+    else { input.value = item.name; onSelect({ def: item.def }); }
+    close();
+  };
+
+  const render = () => {
+    const q = input.value.trim();
+    if (!q) return close();
+    const matches = provider(q).slice(0, limit);
+    const exact = matches.some(m => normalizeExName(m.name) === normalizeExName(q));
+    items = matches.map(m => ({ ...m, isNew: false }));
+    if (!exact) items.push({ isNew: true, name: q }); // free-entry affordance
+
+    list.innerHTML = items.map((m, i) => m.isNew
+      ? `<button type="button" class="autocomplete-item autocomplete-item-new" data-i="${i}">No match — add “${escHtml(m.name)}” as custom</button>`
+      : `<button type="button" class="autocomplete-item" data-i="${i}">
+           <span class="autocomplete-item-name">${escHtml(m.name)}</span>
+           ${m.hint ? `<span class="autocomplete-item-meta">${escHtml(m.hint)}</span>` : ''}
+         </button>`).join('');
+    active = -1;
+    list.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+
+    // Open upward when the list wouldn't fit below (e.g. keyboard up on phone).
+    const rect = input.getBoundingClientRect();
+    const roomBelow = window.innerHeight - rect.bottom;
+    list.classList.toggle('autocomplete-up', roomBelow < 200 && rect.top > roomBelow);
+
+    list.querySelectorAll('.autocomplete-item').forEach(el => {
+      el.addEventListener('mousedown', e => e.preventDefault()); // keep input focus
+      el.addEventListener('click', () => pick(parseInt(el.dataset.i, 10)));
+    });
+  };
+
+  input.addEventListener('input', render);
+  input.addEventListener('focus', () => { if (input.value.trim()) render(); });
+  input.addEventListener('keydown', (e) => {
+    if (list.hidden) return;
+    if (e.key === 'ArrowDown')    { e.preventDefault(); setActive(Math.min(active + 1, items.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(Math.max(active - 1, 0)); }
+    else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); pick(active); }
+    else if (e.key === 'Escape')  { close(); }
+  });
+  input.addEventListener('blur', () => setTimeout(close, 150)); // let a click land first
+}
+
+/**
  * Adds a session-scoped exercise to a date's session (not the recurring
- * plan). Typing filters all previously known exercises; picking one
- * reattaches the existing definition — same id, so its unit, history, and
- * PB data carry over. Unmatched names create a genuinely new exercise.
+ * plan). Typing filters the library + previously known exercises; picking a
+ * known one reattaches its definition (same id, so unit, history and PB data
+ * carry over); picking a library one creates a new exercise already typed to
+ * its loadType/unit. Unmatched names create a genuinely new custom exercise.
  */
 function handleAddExercise(date) {
   const known = buildKnownExerciseList();
@@ -2777,7 +2921,10 @@ function handleAddExercise(date) {
     'Add'
   );
 
-  // Autocomplete: filtered suggestion list under the name input
+  // Autocomplete: the shared type-ahead under the name input (same component
+  // the plan editor uses). Suggestions come from the library + previously-used
+  // exercises; picking a library entry sets the right unit (a Plank comes in as
+  // seconds), a known entry re-attaches by id.
   const wrap       = document.getElementById('dialog-inputs');
   const nameInput  = wrap.querySelector('[data-field="name"]');
   const setsInput  = wrap.querySelector('[data-field="sets"]');
@@ -2791,53 +2938,28 @@ function handleAddExercise(date) {
   };
   unitSelect.addEventListener('change', () => syncUnitLabel(unitSelect.value));
 
-  const listEl = document.createElement('div');
-  listEl.className = 'autocomplete-list';
-  listEl.hidden = true;
-  nameInput.closest('.dialog-field').appendChild(listEl);
-
-  const renderSuggestions = () => {
-    const q = nameInput.value.trim().toLowerCase();
-    if (!q) { listEl.hidden = true; listEl.innerHTML = ''; return; }
-
-    const matches   = known.filter(k => k.name.toLowerCase().includes(q)).slice(0, 8);
-    const exactHit  = known.some(k => k.name.toLowerCase() === q);
-
-    listEl.innerHTML = matches.map(m => `
-      <button type="button" class="autocomplete-item" data-name="${escHtml(m.name)}">
-        <span class="autocomplete-item-name">${escHtml(m.name)}</span>
-        <span class="autocomplete-item-meta">${m.sets}×${escHtml(formatEffort(m.reps, m.unit ?? 'reps'))}</span>
-      </button>`).join('') +
-      (exactHit ? '' : `
-      <button type="button" class="autocomplete-item autocomplete-item-new" data-new="1">
-        + Add new exercise "${escHtml(nameInput.value.trim())}"
-      </button>`);
-    listEl.hidden = false;
-
-    listEl.querySelectorAll('.autocomplete-item').forEach(item => {
-      item.addEventListener('click', () => {
-        if (item.dataset.new) {
-          selected = null; // explicit new exercise with the typed name
-        } else {
-          selected = known.find(k => k.name === item.dataset.name) ?? null;
-          if (selected) {
-            nameInput.value  = selected.name;
-            setsInput.value  = String(selected.sets ?? 3);
-            repsInput.value  = String(selected.reps ?? '8');
-            unitSelect.value = selected.unit === 'seconds' ? 'seconds' : 'reps';
-            syncUnitLabel(unitSelect.value);
-          }
-        }
-        listEl.hidden = true;
-        listEl.innerHTML = '';
-      });
-    });
-  };
-
-  nameInput.addEventListener('input', () => {
-    selected = null; // edits invalidate a previous pick
-    renderSuggestions();
+  attachExerciseAutocomplete(nameInput, {
+    provider: exerciseSuggestionProvider,
+    container: nameInput.closest('.dialog-field'),
+    onSelect: (sel) => {
+      if (sel.isNew) { selected = null; return; }
+      const def = sel.def;
+      nameInput.value  = def.name;
+      unitSelect.value = def.unit === 'seconds' ? 'seconds' : 'reps';
+      syncUnitLabel(unitSelect.value);
+      if (def.source === 'known') {
+        // Re-attach the full known definition (keeps id, history, and cue).
+        selected = known.find(k => k.id === def.id) ?? def;
+        setsInput.value = String(def.sets ?? 3);
+        repsInput.value = String(def.reps ?? '8');
+      } else {
+        selected = null; // library entry → new exercise, typed by name + unit
+      }
+    },
   });
+
+  // Typing after a pick invalidates it.
+  nameInput.addEventListener('input', () => { selected = null; });
 }
 
 /**
@@ -3246,12 +3368,16 @@ function buildPlanExerciseRowHTML(dayIdx, ex) {
   const isSeconds = unit === 'seconds';
   return `
     <div class="plan-exercise-row"
-         data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}">
-      <input class="plan-ex-name" type="text"
-             placeholder="Exercise name"
-             value="${escHtml(ex.name)}"
-             aria-label="Exercise name"
-             data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
+         data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}"
+         data-load-type="${escHtml(ex.loadType ?? '')}" data-muscles="${escHtml(ex.muscles ?? '')}">
+      <div class="plan-ex-name-wrap">
+        <input class="plan-ex-name" type="text"
+               placeholder="Exercise name"
+               value="${escHtml(ex.name)}"
+               aria-label="Exercise name" autocomplete="off"
+               role="combobox" aria-expanded="false" aria-autocomplete="list"
+               data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
+      </div>
       <input class="plan-ex-sets" type="number" min="1" max="20"
              placeholder="Sets"
              value="${ex.sets}"
@@ -3342,14 +3468,16 @@ function wirePlanInteractions() {
       const row = list.lastElementChild;
       wireRemoveButton(row.querySelector('.plan-ex-remove'));
       wireUnitToggle(row.querySelector('.plan-ex-unit'));
+      wirePlanExerciseName(row);
       state.ui.planDirty = true;
       row.querySelector('.plan-ex-name').focus();
     });
   });
 
-  // Remove buttons and unit toggles on pre-existing rows
+  // Remove buttons, unit toggles, and name autocomplete on pre-existing rows
   container.querySelectorAll('.plan-ex-remove').forEach(btn => wireRemoveButton(btn));
   container.querySelectorAll('.plan-ex-unit').forEach(btn => wireUnitToggle(btn));
+  container.querySelectorAll('.plan-exercise-row').forEach(row => wirePlanExerciseName(row));
 
   // Day-level bulk actions
   container.querySelectorAll('.plan-delete-day-btn').forEach(btn => {
@@ -3367,21 +3495,53 @@ function wireRemoveButton(btn) {
   });
 }
 
+/** Sets a plan row's unit button (and its reps input) to reps or seconds. */
+function setPlanRowUnit(btn, toSeconds) {
+  if (!btn) return;
+  btn.dataset.unit = toSeconds ? 'seconds' : 'reps';
+  btn.textContent  = toSeconds ? 'sec' : 'reps';
+  btn.classList.toggle('plan-ex-unit-seconds', toSeconds);
+  btn.setAttribute('aria-label', `Unit: ${toSeconds ? 'seconds' : 'reps'}. Tap to switch.`);
+  const repsInput = btn.closest('.plan-exercise-row')?.querySelector('.plan-ex-reps');
+  if (repsInput) {
+    repsInput.placeholder = toSeconds ? 'Sec' : 'Reps';
+    repsInput.setAttribute('aria-label', toSeconds ? 'Seconds target' : 'Reps target');
+  }
+}
+
 /** Cycles a plan row's unit button reps ↔ sec; read back via data-unit on save. */
 function wireUnitToggle(btn) {
   btn.addEventListener('click', () => {
-    const toSeconds = btn.dataset.unit !== 'seconds';
-    btn.dataset.unit = toSeconds ? 'seconds' : 'reps';
-    btn.textContent  = toSeconds ? 'sec' : 'reps';
-    btn.classList.toggle('plan-ex-unit-seconds', toSeconds);
-    btn.setAttribute('aria-label', `Unit: ${toSeconds ? 'seconds' : 'reps'}. Tap to switch.`);
-    const repsInput = btn.closest('.plan-exercise-row')?.querySelector('.plan-ex-reps');
-    if (repsInput) {
-      repsInput.placeholder = toSeconds ? 'Sec' : 'Reps';
-      repsInput.setAttribute('aria-label', toSeconds ? 'Seconds target' : 'Reps target');
-    }
+    setPlanRowUnit(btn, btn.dataset.unit !== 'seconds');
     state.ui.planDirty = true;
   });
+}
+
+/**
+ * Binds the shared library autocomplete to a plan row's name input: picking an
+ * entry fills the name and stamps loadType / unit / muscles onto the row, so a
+ * plan exercise is correctly typed from creation (no later migration needed).
+ * Typing after a pick clears the stamped type; a free-typed name stays a
+ * custom, untyped exercise (resolved by the existing name/orphan flow).
+ */
+function wirePlanExerciseName(row) {
+  const nameInput = row.querySelector('.plan-ex-name');
+  if (!nameInput) return;
+  attachExerciseAutocomplete(nameInput, {
+    provider: exerciseSuggestionProvider,
+    container: row.querySelector('.plan-ex-name-wrap'),
+    onSelect: (sel) => {
+      state.ui.planDirty = true;
+      if (sel.isNew) { row.dataset.loadType = ''; row.dataset.muscles = ''; return; }
+      const def = sel.def;
+      nameInput.value = def.name;
+      setPlanRowUnit(row.querySelector('.plan-ex-unit'), def.unit === 'seconds');
+      row.dataset.loadType = def.loadType || '';
+      row.dataset.muscles  = def.muscles || '';
+    },
+  });
+  // Editing the name by hand invalidates a prior pick's stamped type.
+  nameInput.addEventListener('input', () => { row.dataset.loadType = ''; row.dataset.muscles = ''; });
 }
 
 /**
@@ -3495,17 +3655,23 @@ async function handleSavePlan() {
       const unit   = row.querySelector('.plan-ex-unit')?.dataset.unit === 'seconds'
         ? 'seconds' : 'reps';
       const origin = day.exercises?.find(e => e.id === exId);
+      // Type stamped when the name was picked from the library; otherwise keep
+      // the existing type, or leave it to name-resolution on load.
+      const loadType = row.dataset.loadType || origin?.loadType || '';
+      const muscles  = row.dataset.muscles  || origin?.muscles  || '';
 
-      updatedExercises.push({
+      const entry = {
         id:       exId,
         name,
         sets,
         reps,
         unit,
-        muscles:  origin?.muscles  ?? '',
-        cue:      origin?.cue      ?? '',
+        muscles,
+        cue:      origin?.cue ?? '',
         archived: false,
-      });
+      };
+      if (loadType) entry.loadType = loadType;
+      updatedExercises.push(entry);
     });
 
     // Soft-archive exercises removed from the DOM (preserves their log history)

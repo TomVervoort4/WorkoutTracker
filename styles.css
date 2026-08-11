@@ -1086,22 +1086,45 @@ a { color: var(--color-accent); text-decoration: none; }
 }
 
 /* ═══════════════════════════════════════════════════════
-   AUTOCOMPLETE (add-exercise dialog)
+   AUTOCOMPLETE (shared: add-exercise dialog + plan editor)
 ═══════════════════════════════════════════════════════ */
+/* Positioned relative to the field it's attached to, overlaying what follows. */
 .autocomplete-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 60;
   margin-top: 4px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-2);
-  max-height: 180px;
+  max-height: 240px;
   overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Opens upward when there isn't room below (keyboard up / bottom of a list). */
+.autocomplete-list.autocomplete-up {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .autocomplete-list { animation: ac-fade 0.12s ease; }
+  @keyframes ac-fade {
+    from { opacity: 0; transform: translateY(-2px); }
+    to   { opacity: 1; transform: none; }
+  }
 }
 
 .autocomplete-item {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: 10px;
   width: 100%;
   padding: 10px 12px;
   font-size: 13px;
@@ -1114,20 +1137,42 @@ a { color: var(--color-accent); text-decoration: none; }
   border-bottom: none;
 }
 
+/* Active item (keyboard highlight) and pointer states share one cyan-tinted look. */
+.autocomplete-item-active,
+.autocomplete-item:hover,
 .autocomplete-item:active {
   background-color: var(--color-surface);
+}
+.autocomplete-item-active {
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+.autocomplete-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .autocomplete-item-meta {
   font-size: 11px;
   color: var(--color-secondary);
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .autocomplete-item-new {
   color: var(--color-accent);
   font-weight: 600;
 }
+
+/* Anchors for the dropdown at each entry point. */
+.dialog-field { position: relative; }
+.plan-ex-name-wrap { position: relative; min-width: 0; }
+
+/* The plan-day card must not clip the dropdown that escapes its exercise row. */
+.plan-day-card { overflow: visible; }
 
 /* ═══════════════════════════════════════════════════════
    DATA TAB
@@ -1179,8 +1224,12 @@ a { color: var(--color-accent); text-decoration: none; }
   padding-bottom: var(--safe-bottom);
   background-color: var(--color-surface);
   border-top: 1px solid var(--color-border);
+  /* One equal column per tab, whatever the count — the tabs always fill the
+     full width edge to edge. (A hardcoded column count left a gap when the
+     Insights tab was retired.) */
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   z-index: 100;
 }
 
