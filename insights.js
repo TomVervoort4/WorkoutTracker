@@ -83,6 +83,23 @@ const ISOLATION_NAME_KEYWORDS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  ID ALIASING — read-time history reunification
+//  Fragmented history (the same movement logged under several ids) is merged
+//  onto one canonical id for all metric reads. The map is authored in app.js
+//  and injected here so insights.js stays dependency-free. It NEVER mutates
+//  logs — it only changes which id a set is counted under when computing a
+//  record or a trend. Empty by default (identity mapping).
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _aliasMap = {}; // sourceId → canonical (target) id
+
+/** Injects the authored alias map (app.js owns it; called once on load). */
+function setAliasMap(map) { _aliasMap = map || {}; }
+
+/** The canonical id a logged/queried id resolves to (itself when unaliased). */
+function canonId(id) { return _aliasMap[id] ?? id; }
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  SMALL LOCAL UTILITIES (self-contained — insights.js has no app.js deps)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -128,10 +145,16 @@ function effectiveLoadType(ex) {
 
 function buildExerciseCatalog(plan, meta) {
   const catalog = new Map();
+  // Key by canonical id and keep the FIRST def seen for it. Plan defs are added
+  // before swap/registry defs, so a current plan exercise wins over the retired
+  // source ids aliased onto it — the merged exercise is listed once, under its
+  // current identity, and hub PR/plateau scans never double-count it.
   const add = (ex) => {
     if (!ex?.id || !ex.name) return;
-    catalog.set(ex.id, {
-      id: ex.id, name: ex.name, unit: ex.unit ?? 'reps', loadType: ex.loadType ?? null,
+    const cid = canonId(ex.id);
+    if (catalog.has(cid)) return;
+    catalog.set(cid, {
+      id: cid, name: ex.name, unit: ex.unit ?? 'reps', loadType: ex.loadType ?? null,
     });
   };
 
@@ -157,15 +180,17 @@ function buildExerciseCatalog(plan, meta) {
 /** Completed sets for one exercise on one date. Gate is reps present (reps or
  *  seconds); weight is optional, since bodyweight/timed/rep work carries none. */
 function doneSets(logs, exerciseId, date) {
+  const target = canonId(exerciseId);
   return logs.filter(l =>
-    l.exerciseId === exerciseId && l.date === date && l.done && l.reps != null
+    canonId(l.exerciseId) === target && l.date === date && l.done && l.reps != null
   );
 }
 
 /** Every date (oldest first) this exercise has at least one completed set. */
 function distinctDates(logs, exerciseId) {
+  const target = canonId(exerciseId);
   return [...new Set(
-    logs.filter(l => l.exerciseId === exerciseId && l.done && l.reps != null).map(l => l.date)
+    logs.filter(l => canonId(l.exerciseId) === target && l.done && l.reps != null).map(l => l.date)
   )].sort();
 }
 
@@ -385,6 +410,7 @@ function checkForNewPB(state, exerciseId, exerciseName, loadType, date) {
 }
 
 export {
+  setAliasMap,
   checkForNewPB,
   computeRecentPRs,
   computePlateaus,

@@ -1,0 +1,28 @@
+{
+  "note": "Authored, deterministic bridge from FitTrack's own exercise ids to free-exercise-db ids. Built ahead of time and reviewed by hand from the 2026-08-13 export — NEVER fuzzy-matched at runtime. Each key is an app exercise id; each value is { referenceId, confidence, name }. referenceId null (or a missing key) means no reference panel renders for that exercise — correct behaviour for orphans and genuinely custom movements, not an error. confidence: high | medium | low | none. Only the 20 CURRENT plan exercises are mapped: the reference detail panel renders on plan cards only, so retired/session-only history ids (added_*, swap_*, most ex_seed_*) are intentionally left unmapped and render no panel. The reference is the muscle/equipment AUTHORITY here — it overrides the copy-paste-wrong muscle strings the audit flags, without touching stored data. name is a human label for review only; the app never reads it.",
+  "schemaVersion": 1,
+  "map": {
+    "ex_msp84vme_937va": { "referenceId": "Barbell_Bench_Press_-_Medium_Grip", "confidence": "high", "name": "Bench Press" },
+    "ex_msp85597_4oy2u": { "referenceId": "Pullups", "confidence": "high", "name": "Pull-up" },
+    "ex_msp85iik_wuqp6": { "referenceId": "Standing_Military_Press", "confidence": "high", "name": "Overhead Press" },
+    "ex_msp85wtj_2dnqm": { "referenceId": "Leverage_Iso_Row", "confidence": "medium", "name": "Chest-Supported Row" },
+    "ex_msp8679f_xpxuo": { "referenceId": "Dumbbell_Bicep_Curl", "confidence": "high", "name": "Bicep Curl" },
+    "ex_msp86m5c_or2dm": { "referenceId": "Triceps_Pushdown", "confidence": "high", "name": "Tricep Pushdown" },
+
+    "ex_msp7xrks_m4f5k": { "referenceId": "Incline_Dumbbell_Press", "confidence": "high", "name": "Incline Dumbbell Press" },
+    "ex_msp7y3g3_qbflc": { "referenceId": "Seated_Cable_Rows", "confidence": "high", "name": "Seated Cable Row" },
+    "ex_msp7yf90_i9qvf": { "referenceId": "Cable_Crossover", "confidence": "high", "name": "Cable Fly" },
+    "ex_msp7z18a_gwo08": { "referenceId": "Face_Pull", "confidence": "high", "name": "Face Pull" },
+    "ex_msp7zfa0_w404t": { "referenceId": "Hammer_Curls", "confidence": "high", "name": "Hammer Curl" },
+    "ex_msp7zz14_330jh": { "referenceId": "Plank", "confidence": "high", "name": "Plank" },
+    "ex_msp83ssa_f0170": { "referenceId": "Hanging_Leg_Raise", "confidence": "high", "name": "Hanging Leg Raise" },
+
+    "ex_seed_squat": { "referenceId": "Barbell_Squat", "confidence": "high", "name": "Back Squat" },
+    "ex_seed_rdl": { "referenceId": "Romanian_Deadlift", "confidence": "high", "name": "Romanian Deadlift" },
+    "ex_seed_leg_press": { "referenceId": "Leg_Press", "confidence": "high", "name": "Leg Press" },
+    "ex_seed_leg_curl": { "referenceId": "Lying_Leg_Curls", "confidence": "medium", "name": "Leg Curl" },
+    "ex_seed_calf_raise": { "referenceId": "Standing_Calf_Raises", "confidence": "high", "name": "Standing Calf Raise" },
+    "ex_seed_ext_rot": { "referenceId": "External_Rotation_with_Band", "confidence": "high", "name": "Band External Rotation" },
+    "ex_seed_pull_apart": { "referenceId": "Band_Pull_Apart", "confidence": "high", "name": "Band Pull-Apart" }
+  }
+}

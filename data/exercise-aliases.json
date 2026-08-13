@@ -1,0 +1,26 @@
+{
+  "note": "Authored, deterministic id-alias map that reunites fragmented logged history at READ time only. Each key is a retired/session-only exercise id whose logged sets belong to the SAME real movement as `target` (a current plan exercise id). At display time (progress, PB, history, the 'Previous' column, hub PRs) sets under a source id are counted as the target's. Logs are NEVER rewritten — this is a pure read-time union, and removing an entry instantly un-merges it. Built by hand from the 2026-08-13 export audit (see EXERCISE-DATA-AUDIT.md F1); never fuzzy-matched at runtime. Only same-movement, load-type-compatible merges are included. Deliberately EXCLUDED because they are different movements or would mix incomparable loads: Lat Pulldown / 'Pull Down' history (weighted pulldown ≠ bodyweight Pull-up), Incline Barbell Bench (≠ Incline Dumbbell Press), Tricep Extension (≠ Tricep Pushdown), Dumbbell Shoulder Press (≠ Barbell Overhead Press), Rear Delt Fly (≠ Band Pull-Apart), and 'Basic Squat' (ambiguous data). confidence: high | medium.",
+  "schemaVersion": 1,
+  "aliases": {
+    "ex_seed_incline_db":    { "target": "ex_msp8679f_xpxuo", "confidence": "high",   "name": "Bicep Curl" },
+    "ex_seed_bench_press":   { "target": "ex_msp84vme_937va", "confidence": "high",   "name": "Bench Press" },
+    "swap_mrp3n6ua_4h7ll":   { "target": "ex_msp84vme_937va", "confidence": "high",   "name": "Bench Press" },
+    "ex_seed_tri_pushdown":  { "target": "ex_msp86m5c_or2dm", "confidence": "high",   "name": "Tricep Pushdown" },
+    "ex_seed_lat_pulldown":  { "target": "ex_msp7zfa0_w404t", "confidence": "high",   "name": "Hammer curl" },
+    "added_mrdutkz1_m62t3":  { "target": "ex_msp7zfa0_w404t", "confidence": "high",   "name": "Hammer curl" },
+    "ex_seed_cable_row":     { "target": "ex_msp7z18a_gwo08", "confidence": "high",   "name": "Face pull" },
+    "added_mrdut5t9_h8oll":  { "target": "ex_msp7z18a_gwo08", "confidence": "high",   "name": "Face pull" },
+    "added_mrduudc3_g9rsx":  { "target": "ex_msp7zz14_330jh", "confidence": "high",   "name": "Plank" },
+    "ex_seed_db_curl":       { "target": "ex_msp7zz14_330jh", "confidence": "high",   "name": "Plank" },
+    "added_mrdurrg0_h4ch5":  { "target": "ex_msp7xrks_m4f5k", "confidence": "high",   "name": "Incline dumbbell press" },
+    "added_mr25gb32_lu83u":  { "target": "ex_seed_leg_press",  "confidence": "high",   "name": "Leg Press" },
+    "added_mraqrkpu_mcieo":  { "target": "ex_seed_leg_press",  "confidence": "high",   "name": "Leg Press" },
+    "added_mraqqex0_lsgf8":  { "target": "ex_seed_squat",      "confidence": "high",   "name": "Back Squat" },
+    "added_mraqqwvc_rebse":  { "target": "ex_seed_rdl",        "confidence": "high",   "name": "Romanian Deadlift" },
+    "added_msnpgtqs_y49qk":  { "target": "ex_msp83ssa_f0170", "confidence": "high",   "name": "Hanging Leg Raise" },
+    "added_msnojlgk_hnq2r":  { "target": "ex_msp85597_4oy2u", "confidence": "high",   "name": "Pull-up" },
+
+    "ex_seed_db_ohp":        { "target": "ex_msp7y3g3_qbflc", "confidence": "medium", "name": "Cable/machine row → Seated Cable Row" },
+    "added_mrduspd0_en0lg":  { "target": "ex_msp7y3g3_qbflc", "confidence": "medium", "name": "Cable/machine row → Seated Cable Row" }
+  }
+}

@@ -2906,3 +2906,415 @@ button.hub-card:hover { border-color: var(--color-border-muted); }
   .hub-stat-value { font-size: 26px; }
   .hub-action { padding: 14px 6px; font-size: 11px; }
 }
+
+/* ═══════════════════════════════════════════════════════
+   EXERCISE LIBRARY + REFERENCE PANEL
+   Browse view over the vendored open dataset, plus the shared read-only
+   reference panel (also reused by the per-plan-exercise detail).
+═══════════════════════════════════════════════════════ */
+
+/* ── Browse controls ─────────────────────────────────── */
+.lib-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lib-search {
+  width: 100%;
+  height: 44px;
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-md);
+  padding: 0 14px;
+  font-size: 15px;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+.lib-search::placeholder { color: var(--color-secondary); }
+.lib-search:focus { outline: none; border-color: var(--color-accent); }
+
+.lib-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.lib-filter { margin: 0; height: 40px; font-size: 13px; }
+/* Category select spans the full width on its own row for legibility. */
+#lib-filter-category { grid-column: 1 / -1; }
+
+.lib-count {
+  font-size: 12px;
+  color: var(--color-secondary);
+  margin: 2px 2px 10px;
+}
+
+/* ── Browse rows (accordion, text-first) ─────────────── */
+.lib-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Leave clearance above the fixed bottom nav. */
+  padding-bottom: 12px;
+}
+
+.lib-row {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.lib-row-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--color-text);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.lib-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.lib-row-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.lib-row-meta {
+  font-size: 12px;
+  color: var(--color-secondary);
+}
+
+.lib-row-head[aria-expanded="true"] .chevron-icon { transform: rotate(180deg); }
+
+.lib-row-body {
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--color-border);
+}
+.lib-row-body[hidden] { display: none; }
+
+/* ── Shared reference panel ──────────────────────────── */
+.ref-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+.ref-confidence {
+  font-size: 12px;
+  color: var(--color-warning);
+  background: rgba(210, 153, 34, 0.10);
+  border: 1px solid rgba(210, 153, 34, 0.28);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+
+/* Demo frames — two stacked images, tap-to-toggle start/finish. */
+.ref-frames {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  margin: 0;
+}
+
+.ref-frame-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--color-secondary);
+  font-size: 12px;
+}
+
+.ref-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background-color: var(--color-surface-2);
+  transition: opacity var(--transition-normal);
+}
+/* Frame 0 (start) shows by default; frame 1 (finish) sits ready above it. */
+.ref-frame-0 { opacity: 1; }
+.ref-frame-1 { opacity: 0; }
+.ref-frames.showing-finish .ref-frame-0 { opacity: 0; }
+.ref-frames.showing-finish .ref-frame-1 { opacity: 1; }
+/* A failed/unloaded image drops out, revealing the placeholder beneath. */
+.ref-frame-failed { opacity: 0 !important; }
+
+.ref-frames-toggle {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--color-text);
+  background: rgba(14, 17, 22, 0.78);
+  border: 1px solid var(--color-border-muted);
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.ref-frames-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--color-border-muted);
+}
+.ref-frames-dot-0 { background: var(--color-accent); }
+.ref-frames.showing-finish .ref-frames-dot-0 { background: var(--color-border-muted); }
+.ref-frames.showing-finish .ref-frames-dot-1 { background: var(--color-accent); }
+
+/* Target muscles */
+.ref-muscles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ref-muscle-row {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+.ref-muscle-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-secondary);
+}
+.ref-muscle-val {
+  font-size: 14px;
+  color: var(--color-text);
+}
+
+/* Fact chips (equipment / mechanic / level) */
+.ref-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ref-chip {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: var(--color-accent-dim);
+  border: 1px solid var(--color-accent-glow);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+/* Instruction steps (verbatim, public domain) */
+.ref-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.ref-steps li {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-text);
+}
+.ref-steps li::marker { color: var(--color-secondary); font-weight: 600; }
+
+.ref-source {
+  font-size: 11px;
+  color: var(--color-secondary);
+  padding-top: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ref-frame { transition: none; }
+}
+
+/* ═══════════════════════════════════════════════════════
+   EXERCISE DETAIL OVERLAY (Step 4a + 4c)
+   Read-only reference panel + per-exercise progress, opened from a plan
+   exercise. Reuses the .ref-* panel styles above for the reference block.
+═══════════════════════════════════════════════════════ */
+.detail-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 320;
+  animation: fade-in var(--transition-fast) ease;
+}
+.detail-overlay[hidden] { display: none; }
+
+.detail-sheet {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-muted);
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+  width: 100%;
+  max-width: 520px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  animation: slide-up var(--transition-normal) ease;
+  padding-bottom: var(--safe-bottom);
+}
+@media (min-width: 560px) {
+  .detail-overlay { align-items: center; padding: 16px; }
+  .detail-sheet { border-radius: var(--radius-xl); border: 1px solid var(--color-border-muted); }
+}
+@keyframes slide-up { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+.detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  background-color: var(--color-surface);
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+}
+.detail-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+.detail-close {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  color: var(--color-secondary);
+  cursor: pointer;
+}
+.detail-close:active { transform: scale(0.94); }
+
+.detail-body {
+  overflow-y: auto;
+  padding: 4px 18px 20px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.detail-section { padding-top: 16px; }
+
+.detail-h {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--color-secondary);
+  margin-bottom: 10px;
+}
+
+.detail-empty {
+  font-size: 13px;
+  color: var(--color-secondary);
+  padding: 8px 0;
+}
+
+/* Progress block */
+.detail-pb {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--color-accent-dim);
+  border: 1px solid var(--color-accent-glow);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+}
+.detail-pb-label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: var(--color-accent);
+}
+.detail-pb-val {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+.detail-pb-when {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-secondary);
+}
+
+.detail-chart { margin-bottom: 8px; }
+.detail-chart:empty { display: none; }
+
+.detail-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.detail-session-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--color-surface-2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.detail-session-date { color: var(--color-secondary); }
+.detail-session-val { color: var(--color-text); font-weight: 600; }
+
+/* The "Reference & progress" trigger on an exercise card */
+.exercise-detail-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 12px 4px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: var(--color-accent-dim);
+  border: 1px solid var(--color-accent-glow);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.exercise-detail-btn:active { transform: scale(0.98); }
+
+/* Lock background scroll while the sheet is open */
+body.detail-open { overflow: hidden; }

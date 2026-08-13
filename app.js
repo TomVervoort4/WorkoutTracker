@@ -7,7 +7,16 @@
  */
 
 import { get, put, del, getAll, getAllKeys, putMany, clear } from './db.js';
-import { checkForNewPB, computeRecentPRs, computePlateaus, computeExerciseSeries, getExercisePR } from './insights.js';
+import { setAliasMap, checkForNewPB, computeRecentPRs, computePlateaus, computeExerciseSeries, getExercisePR } from './insights.js';
+import {
+  loadReference,
+  loadExerciseMap,
+  getReferenceById,
+  getReferenceFacets,
+  referenceForExerciseId,
+  filterReference,
+  referenceImageUrl,
+} from './reference.js';
 import {
   importFitdaysFile,
   loadBodyComposition,
@@ -696,6 +705,45 @@ async function migrateExerciseLoadTypes() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  ID ALIASING — read-time history reunification (authored, non-destructive)
+//
+//  The same real movement is often logged under several ids over time (a plan
+//  rebuild mints new ids; every swap/add mints one too). The authored map at
+//  data/exercise-aliases.json links each retired source id to the current plan
+//  id for the SAME movement, so progress / PB / history / the "Previous" column
+//  read one merged series. Logs are NEVER rewritten — removing an entry
+//  instantly un-merges it, and the JSON export stays pristine (this map lives in
+//  a vendored file, never IndexedDB). insights.js gets the same map via
+//  setAliasMap so every metric agrees.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let EXERCISE_ALIASES = {}; // sourceId → canonical (target) id
+
+/** Loads the authored alias map. Degrades to identity (no merging) on failure. */
+async function loadExerciseAliases() {
+  try {
+    const res  = await fetch('./data/exercise-aliases.json');
+    const data = await res.json();
+    const src  = (data && data.aliases) || {};
+    const map  = {};
+    for (const id in src) {
+      const target = src[id]?.target;
+      if (target && target !== id) map[id] = target;
+    }
+    EXERCISE_ALIASES = map;
+  } catch (err) {
+    console.warn('[FitTrack] exercise aliases not loaded:', err?.message ?? err);
+    EXERCISE_ALIASES = {};
+  }
+  setAliasMap(EXERCISE_ALIASES); // keep insights.js in lock-step
+}
+
+/** The canonical id a logged/queried id resolves to (itself when unaliased). */
+function canonicalExerciseId(id) {
+  return EXERCISE_ALIASES[id] ?? id;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  ORPHAN EXERCISE DETECTION + BACKFILL
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -927,6 +975,7 @@ function render() {
     case 'progress': renderProgress();     break;
     case 'body':     renderBodyTab(state.bodyComposition); break;
     case 'plan':     renderPlan();         break;
+    case 'library':  renderLibrary();      break;
     case 'data':     renderData();         break;
   }
 }
@@ -1089,8 +1138,16 @@ async function init() {
   state.ui.todayDayIndex = dayIndexOf(today);
   state.ui.viewedDate    = today;
 
-  // 2. Pull everything out of IndexedDB (and the vendored exercise library).
-  await Promise.all([loadState(), loadExerciseLibrary()]);
+  // 2. Pull everything out of IndexedDB (and the vendored exercise library +
+  //    the open reference dataset / id-map, both static app content held in
+  //    memory only — never IndexedDB, never the export).
+  await Promise.all([
+    loadState(),
+    loadExerciseLibrary(),
+    loadReference(),
+    loadExerciseMap(),
+    loadExerciseAliases(),
+  ]);
 
   // 3. Write defaults to the DB on the very first launch
   await seedIfFirstRun();
@@ -1145,6 +1202,19 @@ async function init() {
   // 8b. Orphan-review overlay controls
   document.getElementById('orphan-review-later-btn').addEventListener('click', closeOrphanReview);
   document.getElementById('orphan-review-save-btn').addEventListener('click', saveOrphanReview);
+
+  // 8c. Exercise-detail overlay — close button, backdrop tap, Esc, and the
+  //     start/finish frame toggle inside the reference panel.
+  const detailOverlay = document.getElementById('exercise-detail-overlay');
+  document.getElementById('exercise-detail-close').addEventListener('click', closeExerciseDetail);
+  detailOverlay.addEventListener('click', (e) => {
+    if (e.target === detailOverlay) closeExerciseDetail();
+    const toggle = e.target.closest('[data-ref-frames-toggle]');
+    if (toggle) toggle.closest('[data-ref-frames]')?.classList.toggle('showing-finish');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !detailOverlay.hidden) closeExerciseDetail();
+  });
 
   // 9. Confirm dialog buttons
   document.getElementById('dialog-cancel-btn').addEventListener('click', closeDialog);
@@ -1431,8 +1501,11 @@ async function writeLog(date, exerciseId, setIndex, fields) {
  * unweighted plank hold) still surface as a last-time reference.
  */
 function getRecentLogsForExercise(exerciseId, excludeDate) {
+  // Merge aliased history so "Previous" reflects the last real session of this
+  // movement, even if it was logged under a retired id.
+  const target = canonicalExerciseId(exerciseId);
   const done = state.logs.filter(l =>
-    l.exerciseId === exerciseId &&
+    canonicalExerciseId(l.exerciseId) === target &&
     l.date < excludeDate &&
     l.done &&
     (l.weight != null || l.reps != null)
@@ -2305,6 +2378,19 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
        </div>`
     : '';
 
+  // Reference + progress detail — offered only when there's something to show
+  // (a mapped reference entry or logged history). Unmapped, un-logged exercises
+  // simply get no button — correct, not an error.
+  const detailBtn = hasExerciseDetail(ex.id)
+    ? `<button class="exercise-detail-btn" data-ex-id="${escHtml(ex.id)}" data-ex-name="${escHtml(ex.name)}">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/><line x1="12" y1="10" x2="12" y2="16"/>
+          <circle cx="12" cy="7.5" r="0.6" fill="currentColor"/></svg>
+        Reference &amp; progress
+      </button>`
+    : '';
+
   const actionsRow = readOnly ? '' : `
         <div class="exercise-actions-row">
           <button class="btn-ghost remove-ex-btn"
@@ -2337,6 +2423,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
       </button>
       <div class="exercise-body${expanded ? ' expanded' : ''}">
         ${metaBlock}
+        ${detailBtn}
         <div class="sets-table">
           <div class="sets-table-header${headVariant}">
             <span>Set</span><span>Previous</span>
@@ -2457,6 +2544,14 @@ function wireExerciseCards(exercises, date) {
   // Stopwatch buttons on seconds-based sets
   stack.querySelectorAll('.set-timer').forEach(btn => {
     btn.addEventListener('click', () => handleDurationTimerClick(btn, date));
+  });
+
+  // Reference & progress detail — opens the read-only overlay
+  stack.querySelectorAll('.exercise-detail-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openExerciseDetail(btn.dataset.exId, btn.dataset.exName);
+    });
   });
 
   // Weight / reps inputs — persist on blur so re-renders don't lose values
@@ -3239,9 +3334,10 @@ function populateHistorySelect() {
   const sel        = document.getElementById('history-exercise-select');
   const currentVal = sel.value;
 
-  // All exerciseIds that have at least one done log
+  // All exerciseIds with at least one done log, collapsed onto their canonical
+  // id so a movement whose history spans several ids appears once, current-name.
   const loggedIds = [...new Set(
-    state.logs.filter(l => l.done).map(l => l.exerciseId)
+    state.logs.filter(l => l.done).map(l => canonicalExerciseId(l.exerciseId))
   )];
 
   sel.innerHTML = '<option value="">— Select an exercise —</option>' +
@@ -3264,10 +3360,11 @@ function renderExerciseHistory(exerciseId) {
   const prog = document.getElementById('history-progression');
   if (!exerciseId) { list.innerHTML = ''; prog.innerHTML = ''; return; }
 
-  // Group done logs by date
+  // Group done logs by date — aliased source ids merge into this exercise.
+  const target = canonicalExerciseId(exerciseId);
   const byDate = {};
   for (const log of state.logs) {
-    if (log.exerciseId !== exerciseId || !log.done) continue;
+    if (canonicalExerciseId(log.exerciseId) !== target || !log.done) continue;
     if (!byDate[log.date]) byDate[log.date] = [];
     byDate[log.date].push(log);
   }
@@ -3343,6 +3440,390 @@ function renderExerciseHistory(exerciseId) {
         </div>${noteRow}
       </div>`;
   }).join('');
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  EXERCISE REFERENCE — shared panel + Browse Library (Step 4a shell / 4b)
+//
+//  Presentation over the vendored open dataset (free-exercise-db). Pure display
+//  of facts — target muscles, equipment, mechanic, verbatim instructions, and
+//  the start/finish demo frames. No coaching, no inference. The same panel
+//  builder serves both the browse library (remote, lazy images) and, later, the
+//  per-plan-exercise detail (locally vendored images), so the two never drift.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Phone-first cap on how many browse rows render at once. Text rows are cheap,
+// but 600+ accordions is not; the count line tells the user to narrow.
+const LIBRARY_RENDER_CAP = 200;
+
+let _libraryWired = false; // one-time filter population + listener wiring
+
+/** 'body only' → 'Body only'; 'olympic weightlifting' → 'Olympic weightlifting'. */
+function refLabel(s) {
+  const str = String(s ?? '').trim();
+  return str ? str.charAt(0).toUpperCase() + str.slice(1) : '';
+}
+
+/** Comma-joined, capitalised muscle list, or '—' when empty. */
+function refMuscleList(arr) {
+  const list = (arr ?? []).map(refLabel).filter(Boolean);
+  return list.length ? list.join(', ') : '—';
+}
+
+/**
+ * The two demonstration frames (start / finish) as a tap-to-toggle figure.
+ * `mode` picks the image source: 'remote' lazy-loads from the GitHub raw base
+ * (browse library) and degrades to a text placeholder offline/on error;
+ * 'local' points at the vendored copies under data/exercise-images (plan
+ * exercises, fully offline). A failed image reveals the placeholder beneath it
+ * — a row's text never waits on a picture.
+ */
+function refFramesHTML(entry, mode) {
+  const imgs = entry.images ?? [];
+  if (imgs.length < 1) return '';
+  const srcFor = (rel) =>
+    mode === 'local' ? `./data/exercise-images/${rel}` : referenceImageUrl(rel);
+
+  const frame = (rel, cls, alt) => rel
+    ? `<img class="ref-frame ${cls}" src="${escHtml(srcFor(rel))}" alt="${escHtml(alt)}"
+            loading="lazy" decoding="async"
+            onerror="this.classList.add('ref-frame-failed')" />`
+    : '';
+
+  return `
+    <figure class="ref-frames" data-ref-frames aria-label="Exercise demonstration">
+      <div class="ref-frame-placeholder" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+        <span>Image loads online</span>
+      </div>
+      ${frame(imgs[0], 'ref-frame-0', 'Start position')}
+      ${frame(imgs[1], 'ref-frame-1', 'Finish position')}
+      ${imgs[1] ? `<button type="button" class="ref-frames-toggle" data-ref-frames-toggle>
+        <span class="ref-frames-dot ref-frames-dot-0"></span>
+        <span class="ref-frames-dot ref-frames-dot-1"></span>
+        Start · Finish</button>` : ''}
+    </figure>`;
+}
+
+/**
+ * The read-only reference panel for one dataset entry: target muscles,
+ * equipment, mechanic, demo frames, and the verbatim instruction steps
+ * (public domain). `imageMode` = 'remote' | 'local'. Shows a small confidence
+ * note only when the caller passes a non-high match, so a hand-reviewed guess
+ * is honest about itself.
+ */
+function buildReferencePanelHTML(entry, { imageMode = 'remote', confidence = 'high' } = {}) {
+  if (!entry) return '';
+  const steps = (entry.instructions ?? []).filter(s => s && s.trim());
+  const meta = [];
+  if (entry.equipment) meta.push(`<span class="ref-chip">${escHtml(refLabel(entry.equipment))}</span>`);
+  if (entry.mechanic)  meta.push(`<span class="ref-chip">${escHtml(refLabel(entry.mechanic))}</span>`);
+  if (entry.level)     meta.push(`<span class="ref-chip">${escHtml(refLabel(entry.level))}</span>`);
+
+  const lowConfNote = (confidence && confidence !== 'high')
+    ? `<p class="ref-confidence">Reference match is ${escHtml(confidence)} confidence — verify it fits your movement.</p>`
+    : '';
+
+  return `
+    <div class="ref-panel">
+      ${lowConfNote}
+      ${refFramesHTML(entry, imageMode)}
+      <div class="ref-muscles">
+        <div class="ref-muscle-row">
+          <span class="ref-muscle-label">Primary</span>
+          <span class="ref-muscle-val">${escHtml(refMuscleList(entry.primaryMuscles))}</span>
+        </div>
+        <div class="ref-muscle-row">
+          <span class="ref-muscle-label">Secondary</span>
+          <span class="ref-muscle-val">${escHtml(refMuscleList(entry.secondaryMuscles))}</span>
+        </div>
+      </div>
+      ${meta.length ? `<div class="ref-chips">${meta.join('')}</div>` : ''}
+      ${steps.length ? `
+        <ol class="ref-steps">
+          ${steps.map(s => `<li>${escHtml(s)}</li>`).join('')}
+        </ol>` : ''}
+      <p class="ref-source">Reference: free-exercise-db (public domain)</p>
+    </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  BROWSE LIBRARY (Step 4b)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function renderLibrary() {
+  if (!_libraryWired) wireLibrary();
+  applyLibraryFilter();
+}
+
+/** One-time: fill the filter dropdowns from the loaded dataset and wire input. */
+function wireLibrary() {
+  const { muscles, equipment, categories } = getReferenceFacets();
+
+  const muscleSel = document.getElementById('lib-filter-muscle');
+  for (const m of muscles) {
+    muscleSel.insertAdjacentHTML('beforeend',
+      `<option value="${escHtml(m)}">${escHtml(refLabel(m))}</option>`);
+  }
+
+  const equipSel = document.getElementById('lib-filter-equipment');
+  for (const e of equipment) {
+    equipSel.insertAdjacentHTML('beforeend',
+      `<option value="${escHtml(e)}">${escHtml(refLabel(e))}</option>`);
+  }
+
+  // Category: grouped lifting default first, then All, then each specific one.
+  const catSel = document.getElementById('lib-filter-category');
+  catSel.insertAdjacentHTML('beforeend',
+    `<option value="lifting" selected>Strength / Powerlifting / Olympic</option>` +
+    `<option value="all">All categories</option>` +
+    categories.map(c => `<option value="${escHtml(c)}">${escHtml(refLabel(c))}</option>`).join(''));
+
+  const search = document.getElementById('lib-search');
+  search.addEventListener('input', debounceLibraryFilter);
+  muscleSel.addEventListener('change', applyLibraryFilter);
+  equipSel.addEventListener('change', applyLibraryFilter);
+  catSel.addEventListener('change', applyLibraryFilter);
+
+  // Delegated: expand/collapse a row, and toggle its demo frames.
+  const list = document.getElementById('lib-list');
+  list.addEventListener('click', (e) => {
+    const toggle = e.target.closest('[data-ref-frames-toggle]');
+    if (toggle) {
+      toggle.closest('[data-ref-frames]')?.classList.toggle('showing-finish');
+      return;
+    }
+    const head = e.target.closest('.lib-row-head');
+    if (head) toggleLibraryRow(head);
+  });
+
+  _libraryWired = true;
+}
+
+let _libFilterTimer = null;
+function debounceLibraryFilter() {
+  clearTimeout(_libFilterTimer);
+  _libFilterTimer = setTimeout(applyLibraryFilter, 160);
+}
+
+/** Reads the controls, filters the dataset, and renders the (capped) rows. */
+function applyLibraryFilter() {
+  const query     = document.getElementById('lib-search').value;
+  const muscle    = document.getElementById('lib-filter-muscle').value;
+  const equipment = document.getElementById('lib-filter-equipment').value;
+  const category  = document.getElementById('lib-filter-category').value;
+
+  const matches = filterReference({ query, muscle, equipment, category });
+  const shown   = matches.slice(0, LIBRARY_RENDER_CAP);
+
+  const countEl = document.getElementById('lib-count');
+  if (!matches.length) {
+    countEl.textContent = 'No exercises match those filters.';
+  } else if (matches.length > shown.length) {
+    countEl.textContent = `Showing ${shown.length} of ${matches.length} — search or filter to narrow.`;
+  } else {
+    countEl.textContent = `${matches.length} exercise${matches.length === 1 ? '' : 's'}`;
+  }
+
+  const list = document.getElementById('lib-list');
+  list.innerHTML = shown.map(buildLibraryRowHTML).join('');
+}
+
+/** A collapsed browse row — text only, so it renders instantly and offline. */
+function buildLibraryRowHTML(entry) {
+  const sub = [refLabel(entry.primaryMuscles?.[0]), refLabel(entry.equipment)]
+    .filter(Boolean).join(' · ');
+  return `
+    <div class="lib-row" data-ref-id="${escHtml(entry.id)}">
+      <button type="button" class="lib-row-head" aria-expanded="false">
+        <span class="lib-row-text">
+          <span class="lib-row-name">${escHtml(entry.name)}</span>
+          <span class="lib-row-meta">${escHtml(sub || '—')}</span>
+        </span>
+        <svg class="chevron-icon" width="16" height="16" viewBox="0 0 24 24"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      <div class="lib-row-body" hidden></div>
+    </div>`;
+}
+
+/** Expand/collapse one browse row; builds its panel (with images) on first open. */
+function toggleLibraryRow(head) {
+  const row  = head.closest('.lib-row');
+  const body = row.querySelector('.lib-row-body');
+  const open = head.getAttribute('aria-expanded') === 'true';
+
+  if (open) {
+    head.setAttribute('aria-expanded', 'false');
+    body.hidden = true;
+    return;
+  }
+  // Build the panel lazily the first time — this is when remote images start.
+  if (!body.dataset.built) {
+    const entry = getReferenceById(row.dataset.refId);
+    body.innerHTML = entry ? buildReferencePanelHTML(entry, { imageMode: 'remote' }) : '';
+    body.dataset.built = '1';
+  }
+  head.setAttribute('aria-expanded', 'true');
+  body.hidden = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  EXERCISE DETAIL (Step 4a + 4c) — read-only reference + per-exercise progress
+//
+//  A tap-to-open overlay on a plan exercise: the shared reference panel (local
+//  vendored images, so it works fully offline) plus a deterministic progress
+//  view. The progress metric follows the reference `mechanic` where the app can
+//  do so WITHOUT fabricating a record: a weighted compound trends estimated 1RM
+//  (Epley), a weighted isolation trends session volume. Anything not externally
+//  loaded (bodyweight / timed / rep / assisted) keeps its loadType metric — a
+//  pull-up never gets a phantom kg e1RM. Display only; it never interprets the
+//  trend. Intentionally simple: a forerunner the Insights module can absorb.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DETAIL_LAST_N = 6;
+const EPLEY_DIVISOR = 30;
+
+function round1(n) { return Math.round(n * 10) / 10; }
+function epley1RM(w, r) { return (w == null || r == null || r <= 0) ? null : w * (1 + r / EPLEY_DIVISOR); }
+
+/** Every completed, rep-bearing set for an exercise — aliased history merged. */
+function doneSetsForExercise(exId) {
+  const target = canonicalExerciseId(exId);
+  return state.logs.filter(l => canonicalExerciseId(l.exerciseId) === target && l.done && l.reps != null);
+}
+
+/** True when a plan exercise has anything to show in a detail overlay. */
+function hasExerciseDetail(exId) {
+  return !!referenceForExerciseId(exId) || doneSetsForExercise(exId).length > 0;
+}
+
+/**
+ * The progress series for the detail chart. mechanic (from the reference entry,
+ * or null when unmapped) chooses e1RM vs volume for WEIGHTED work only; all
+ * other loadTypes defer to the app's canonical loadType series so no kg is ever
+ * invented. Same shape as insights.computeExerciseSeries.
+ */
+function buildDetailSeries(exId, mechanic, loadType) {
+  if (loadType !== 'weighted') {
+    return computeExerciseSeries(state, exId, {
+      name: '', unit: getExerciseUnit(exId), loadType,
+    });
+  }
+  const sets  = doneSetsForExercise(exId);
+  const dates = [...new Set(sets.map(s => s.date))].sort();
+  const byDate = d => sets.filter(s => s.date === d);
+
+  if (mechanic === 'isolation') {
+    const points = dates.map(d => ({
+      date: d,
+      value: round1(byDate(d).reduce((a, s) => a + (s.weight ?? 0) * (s.reps ?? 0), 0)),
+    })).filter(p => p.value > 0);
+    return { loadType, metricLabel: 'Volume (kg)', lowerIsBetter: false, points };
+  }
+  // compound, or weighted-but-unmapped → estimated 1RM
+  const points = dates.map(d => {
+    const best = Math.max(...byDate(d).map(s => epley1RM(s.weight, s.reps) ?? 0));
+    return { date: d, value: round1(best) };
+  }).filter(p => p.value > 0);
+  return { loadType, metricLabel: 'Est. 1RM (kg)', lowerIsBetter: false, points };
+}
+
+/** Compact last-N session rows for the detail view (newest first). */
+function buildDetailSessionsHTML(exId, loadType) {
+  const sets = doneSetsForExercise(exId);
+  const byDate = {};
+  for (const s of sets) (byDate[s.date] ??= []).push(s);
+  const dates = Object.keys(byDate).sort().reverse().slice(0, DETAIL_LAST_N);
+  if (!dates.length) return '';
+
+  const rows = dates.map(d => {
+    const es = byDate[d];
+    const n  = es.length;
+    const maxReps = Math.max(...es.map(s => s.reps ?? 0));
+    let val;
+    if (loadType === 'timed') val = `best ${maxReps}s · ${n} sets`;
+    else if (loadType === 'weighted') {
+      const maxWt = Math.max(...es.map(s => s.weight ?? 0));
+      const avg   = Math.round(es.reduce((a, s) => a + (s.reps ?? 0), 0) / n);
+      val = `${maxWt}kg × ${avg} · ${n} sets`;
+    } else if (loadType === 'assisted') {
+      const assists = es.map(s => s.weight).filter(w => w != null);
+      val = assists.length ? `${Math.min(...assists)}kg assist · ${n} sets` : `${maxReps} reps · ${n} sets`;
+    } else val = `${maxReps} reps · ${n} sets`;
+    return `<div class="detail-session-row">
+      <span class="detail-session-date">${escHtml(friendlyDateLabel(d))}</span>
+      <span class="detail-session-val">${escHtml(val)}</span></div>`;
+  }).join('');
+
+  return `<div class="detail-sessions">${rows}</div>`;
+}
+
+/** The progress block: chart (≥2 points), PB line, and last-N sessions. */
+function buildExerciseProgressHTML(exId, name, mechanic) {
+  const unit     = getExerciseUnit(exId);
+  const loadType = getExerciseLoadType(exId) ?? (unit === 'seconds' ? 'timed' : 'reps');
+  const series   = buildDetailSeries(exId, mechanic, loadType);
+  const pr       = getExercisePR(state, exId, { name, unit, loadType });
+
+  if (!series.points.length) {
+    return `<div class="detail-section">
+      <h3 class="detail-h">Progress</h3>
+      <p class="detail-empty">No logged history yet for this exercise.</p>
+    </div>`;
+  }
+
+  const chart = series.points.length >= 2
+    ? buildProgressionChartSVG(series)
+    : '<p class="detail-empty">One session logged — the trend line needs at least two.</p>';
+
+  const prLine = pr ? `<div class="detail-pb">
+      <span class="detail-pb-label">PB</span>
+      <span class="detail-pb-val">${escHtml(pr.display.value)}${pr.display.note ? ' ' + escHtml(pr.display.note) : ''}</span>
+      <span class="detail-pb-when">${escHtml(friendlyDateLabel(pr.date))}</span>
+    </div>` : '';
+
+  return `<div class="detail-section">
+    <h3 class="detail-h">Progress</h3>
+    ${prLine}
+    <div class="detail-chart">${chart}</div>
+    ${buildDetailSessionsHTML(exId, loadType)}
+  </div>`;
+}
+
+/** Full overlay content: reference panel (if mapped) + progress. */
+function buildExerciseDetailContent(exId, name) {
+  const ref = referenceForExerciseId(exId);
+  const refBlock = ref
+    ? `<div class="detail-section">
+         <h3 class="detail-h">Reference</h3>
+         ${buildReferencePanelHTML(ref.entry, { imageMode: 'local', confidence: ref.confidence })}
+       </div>`
+    : `<div class="detail-section">
+         <p class="detail-empty">No reference match for this exercise — showing progress only.</p>
+       </div>`;
+  return refBlock + buildExerciseProgressHTML(exId, name, ref?.entry?.mechanic ?? null);
+}
+
+function openExerciseDetail(exId, name) {
+  const overlay = document.getElementById('exercise-detail-overlay');
+  const title   = document.getElementById('exercise-detail-title');
+  const body    = document.getElementById('exercise-detail-body');
+  title.textContent = name || getExerciseName(exId);
+  body.innerHTML    = buildExerciseDetailContent(exId, name || getExerciseName(exId));
+  overlay.hidden = false;
+  document.body.classList.add('detail-open');
+}
+
+function closeExerciseDetail() {
+  document.getElementById('exercise-detail-overlay').hidden = true;
+  document.body.classList.remove('detail-open');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

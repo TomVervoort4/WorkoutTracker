@@ -240,6 +240,43 @@
 
     </section>
 
+    <!-- ── LIBRARY TAB — browsable reference over the full vendored dataset ── -->
+    <section class="tab-view" id="view-library" role="tabpanel" aria-label="Exercise library" hidden>
+
+      <div class="section-header">
+        <h2 class="section-title">Exercise Library</h2>
+      </div>
+      <p class="section-sub">
+        Open, public-domain reference (free-exercise-db). Text works offline;
+        images load when online.
+      </p>
+
+      <!-- Search + filters. JS fills the selects from the loaded dataset. -->
+      <div class="lib-controls">
+        <input type="search" class="lib-search" id="lib-search"
+               placeholder="Search exercises…" aria-label="Search exercises"
+               autocomplete="off" />
+        <div class="lib-filter-row">
+          <select class="select-input lib-filter" id="lib-filter-muscle" aria-label="Filter by primary muscle">
+            <option value="">All muscles</option>
+          </select>
+          <select class="select-input lib-filter" id="lib-filter-equipment" aria-label="Filter by equipment">
+            <option value="">All equipment</option>
+          </select>
+          <select class="select-input lib-filter" id="lib-filter-category" aria-label="Filter by category">
+            <!-- JS fills; default selects the grouped lifting option -->
+          </select>
+        </div>
+      </div>
+
+      <p class="lib-count" id="lib-count" aria-live="polite"></p>
+
+      <div class="lib-list" id="lib-list">
+        <!-- JS renders one row per matching exercise here -->
+      </div>
+
+    </section>
+
     <!-- ── DATA TAB ── -->
     <section class="tab-view" id="view-data" role="tabpanel" aria-label="Data management" hidden>
 
@@ -347,6 +384,13 @@
       </svg>
       <span>Plan</span>
     </button>
+    <button class="nav-tab" data-view="library" aria-label="Exercise library" aria-selected="false" role="tab">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+      </svg>
+      <span>Library</span>
+    </button>
     <button class="nav-tab" data-view="data" aria-label="Data management" aria-selected="false" role="tab">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <ellipse cx="12" cy="5" rx="9" ry="3"/>
@@ -413,6 +457,23 @@
         <button class="btn-secondary" id="orphan-review-later-btn">Later</button>
         <button class="btn-primary" id="orphan-review-save-btn">Save names</button>
       </footer>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       EXERCISE DETAIL OVERLAY — read-only reference + progress
+  ═══════════════════════════════════════════ -->
+  <div class="detail-overlay" id="exercise-detail-overlay" hidden aria-modal="true" role="dialog" aria-labelledby="exercise-detail-title">
+    <div class="detail-sheet">
+      <header class="detail-head">
+        <h2 class="detail-title" id="exercise-detail-title">Exercise</h2>
+        <button class="detail-close" id="exercise-detail-close" aria-label="Close exercise detail">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <div class="detail-body" id="exercise-detail-body"><!-- JS renders reference + progress here --></div>
     </div>
   </div>
 
