@@ -1040,6 +1040,19 @@ function switchView(viewName) {
   render();
 }
 
+/** Open the header settings menu (Data & Library live here now). */
+function openSettings() {
+  const overlay = document.getElementById('settings-overlay');
+  overlay.hidden = false;
+  overlay.querySelector('.settings-menu-item')?.focus();
+}
+
+/** Close the header settings menu and return focus to the gear. */
+function closeSettings() {
+  document.getElementById('settings-overlay').hidden = true;
+  document.getElementById('settings-btn')?.focus();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  HEADER RENDER
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1193,6 +1206,23 @@ async function init() {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
   });
 
+  // 4b. Header settings menu — reaches the Data and Library views that left the
+  //     primary nav. The views themselves are unchanged; only how they're opened.
+  document.getElementById('settings-btn').addEventListener('click', openSettings);
+  document.getElementById('settings-close-btn').addEventListener('click', closeSettings);
+  document.querySelectorAll('.settings-menu-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      closeSettings();
+      switchView(btn.dataset.settingsView);
+    });
+  });
+  document.getElementById('settings-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'settings-overlay') closeSettings(); // tap the backdrop to dismiss
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !document.getElementById('settings-overlay').hidden) closeSettings();
+  });
+
   // 5. Body tab — Fitdays import. The visible button drives the hidden file
   //    input so the control is keyboard-focusable and styled like the app.
   const bcInput = document.getElementById('bc-import-input');
@@ -1325,6 +1355,9 @@ function startRestTimer() {
   clearInterval(_restTimer.interval);
   _restTimer.endsAt = Date.now() + REST_TIMER_SECONDS * 1000;
   document.getElementById('rest-timer').hidden = false;
+  // The rest-timer bar floats above the nav; give the scroll content extra
+  // bottom clearance so the last set row can scroll clear of both stacked bars.
+  document.body.classList.add('rest-timer-active');
   updateRestTimerDisplay();
   _restTimer.interval = setInterval(() => {
     if (updateRestTimerDisplay() <= 0) {
@@ -1339,6 +1372,7 @@ function stopRestTimer() {
   clearInterval(_restTimer.interval);
   _restTimer.interval = null;
   document.getElementById('rest-timer').hidden = true;
+  document.body.classList.remove('rest-timer-active');
 }
 
 function extendRestTimer(seconds = 30) {
@@ -2481,11 +2515,19 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
                data-field="weight" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
                ${disabledAttr} />` : '';
 
+    // Previous-session reference lives OUTSIDE the input grid now: a quiet line
+    // above the inputs, given full row width so "80 × 8 last time" is never
+    // crushed to an ellipsis. Absent history renders nothing (no em-dash column).
+    const prevLine = prev
+      ? `<span class="set-prev-label">last: ${escHtml(prevRef(prev))}</span>`
+      : '';
+
     return `
-      <div class="set-row${rowVariant}${done ? ' set-logged' : ''}"
-           data-ex-id="${escHtml(ex.id)}" data-set-index="${i}">
+      <div class="set-entry">
+        ${prevLine}
+        <div class="set-row${rowVariant}${done ? ' set-logged' : ''}"
+             data-ex-id="${escHtml(ex.id)}" data-set-index="${i}">
         <span class="set-num">${i + 1}</span>
-        <span class="set-prev">${escHtml(prevRef(prev))}</span>
         ${loadInput}
         <input class="set-input set-reps"
                type="number" inputmode="numeric" min="1"
@@ -2513,6 +2555,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
             <polyline points="20 6 9 17 4 12"/>
           </svg>
         </button>
+        </div>
       </div>`;
   }).join('');
 
@@ -2576,7 +2619,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
         ${detailBtn}
         <div class="sets-table">
           <div class="sets-table-header${headVariant}">
-            <span>Set</span><span>Previous</span>
+            <span>Set</span>
             ${hasLoad ? `<span>${escHtml(loadCol.label)}</span>` : ''}
             <span>${isTimed ? 'Sec' : 'Reps'}</span><span>RPE</span>${isTimed ? '<span></span>' : ''}<span></span>
           </div>
