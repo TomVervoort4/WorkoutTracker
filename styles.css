@@ -540,7 +540,7 @@ a { color: var(--color-accent); text-decoration: none; }
 
 .sets-table-header {
   display: grid;
-  grid-template-columns: 28px 1fr 72px 72px 44px;
+  grid-template-columns: 28px 1fr 72px 72px 52px 44px;
   gap: 4px;
   padding: 4px 4px 8px;
   font-size: 11px;
@@ -554,7 +554,7 @@ a { color: var(--color-accent); text-decoration: none; }
 
 .set-row {
   display: grid;
-  grid-template-columns: 28px 1fr 72px 72px 44px;
+  grid-template-columns: 28px 1fr 72px 72px 52px 44px;
   gap: 4px;
   align-items: center;
   padding: 4px;
@@ -627,16 +627,16 @@ a { color: var(--color-accent); text-decoration: none; }
   color: var(--color-success);
 }
 
-/* Timed sets — no load column, plus a stopwatch: set · prev · sec · timer · check */
+/* Timed sets — no load column, plus a stopwatch: set · prev · sec · rpe · timer · check */
 .set-row.set-row-timed,
 .sets-table-header.sets-header-timed {
-  grid-template-columns: 28px 1fr 72px 36px 44px;
+  grid-template-columns: 28px 1fr 72px 52px 36px 44px;
 }
 
-/* Rep-only sets — no load column: set · prev · reps · check */
+/* Rep-only sets — no load column: set · prev · reps · rpe · check */
 .set-row.set-row-repsonly,
 .sets-table-header.sets-header-repsonly {
-  grid-template-columns: 28px 1fr 72px 44px;
+  grid-template-columns: 28px 1fr 72px 52px 44px;
 }
 
 .set-timer {
@@ -685,6 +685,34 @@ a { color: var(--color-accent); text-decoration: none; }
 
 .notes-input::placeholder {
   color: var(--color-border-muted);
+}
+
+/* Whole-session note — one per day, sits in the session overview bar, visually
+   distinct from the per-exercise Notes field inside each card. */
+.session-note-input {
+  width: 100%;
+  height: 34px;
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--color-secondary);
+  transition: border-color var(--transition-fast);
+}
+
+.session-note-input:focus {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.session-note-input::placeholder {
+  color: var(--color-border-muted);
+}
+
+.session-note-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Viewing-a-different-date banner */
@@ -2855,6 +2883,15 @@ button.hub-card:hover { border-color: var(--color-border-muted); }
   color: var(--color-text);
 }
 .hub-backup-line.hub-backup-stale { color: var(--color-warning); }
+
+/* Body-composition freshness — whole days since the last reading. Quiet fact by
+   default; amber only once it passes BODY_COMP_STALE_DAYS. Display only. */
+.hub-body-freshness {
+  font-size: 12px;
+  color: var(--color-secondary);
+  margin-top: -8px;
+}
+.hub-body-freshness.hub-body-freshness-stale { color: var(--color-warning); }
 
 /* Metric qualifier beside a PR value (e.g. "e1RM") — quiet, not the headline. */
 .hub-pr-metric {

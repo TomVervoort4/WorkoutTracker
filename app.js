@@ -52,6 +52,15 @@ const LAST_BACKUP_KEY = 'lastBackupDate';
 // (today − lastBackupDate) in whole days compared against this threshold.
 const LAST_BACKUP_STALE_DAYS = 14;
 
+// Days since the most recent body-composition reading at which the body card's
+// freshness line takes an attention accent. Same (today − date) computation.
+const BODY_COMP_STALE_DAYS = 14;
+
+// Sane bounds for the optional per-set RPE (rate of perceived exertion). Values
+// outside this domain are simply not stored — never an error. Capture-only.
+const RPE_MIN = 6;
+const RPE_MAX = 10;
+
 // Meta keys from retired features (streak counter, fixed-Monday bodyweight
 // prompt) — silently deleted from the DB on load, never written again.
 const RETIRED_META_KEYS = ['streak', 'bwPromptDate'];
@@ -1249,6 +1258,11 @@ async function init() {
     }
   });
 
+  // Session-level note — static element, so wire once here; renderToday keeps its
+  // value and dataset.date current. Persists on blur against the viewed date.
+  const sessionNoteInput = document.getElementById('session-note-input');
+  sessionNoteInput.addEventListener('blur', () => saveSessionNote(sessionNoteInput));
+
   // 10. First paint
   render();
 
@@ -1521,6 +1535,10 @@ async function writeLog(date, exerciseId, setIndex, fields) {
     setIndex,
     weight:         fields.weight         ?? existing?.weight         ?? null,
     reps:           fields.reps           ?? existing?.reps           ?? null,
+    // Optional felt-effort (RPE), capture-only. Purely additive and nullable
+    // like every field here — absent means null, and no insight/PR/volume path
+    // ever reads it. It exists to be logged and exported, nothing more.
+    rpe:            fields.rpe            ?? existing?.rpe            ?? null,
     done:           fields.done           ?? existing?.done           ?? false,
     notes:          fields.notes          ?? existing?.notes          ?? '',
     substituteName: fields.substituteName ?? existing?.substituteName ?? null,
@@ -1534,6 +1552,33 @@ async function writeLog(date, exerciseId, setIndex, fields) {
   if (idx >= 0) state.logs[idx] = entry;
   else state.logs.push(entry);
   return entry;
+}
+
+/**
+ * Persist the whole-session note for a date. Keyed in meta as
+ * `sessionNote_<date>` — the same per-date convention as swaps_/removed_ — so it
+ * round-trips through the existing meta export with no changes to
+ * buildBackupPayload or handleImport. An empty note deletes the key rather than
+ * storing a blank record. In-memory state.meta is updated so it survives tab
+ * switches without a reload. Capture-only: nothing interprets this string.
+ */
+async function saveSessionNote(input) {
+  const date = input.dataset.date;
+  if (!date) return;
+  const key = `sessionNote_${date}`;
+  const val = input.value.trim();
+
+  if (!val) {
+    if (state.meta[key]) {
+      await del('meta', key);
+      delete state.meta[key];
+    }
+    return;
+  }
+
+  const doc = { key, value: val };
+  await put('meta', doc);
+  state.meta[key] = doc;
 }
 
 /**
@@ -1932,12 +1977,22 @@ function buildHubBody(days) {
   const prev   = days.length > 1 ? days[days.length - 2] : null;
   const since  = prev?.date ?? null;
 
+  // Freshness line — display only: whole days since the most recent reading,
+  // stated as a fact and accented only once it passes the stale threshold. It
+  // never judges the gap, extrapolates across it, or discounts the chart.
+  const daysAgo = daysBetweenDates(latest.date, state.ui.today);
+  const staleReading = daysAgo >= BODY_COMP_STALE_DAYS;
+  const freshnessLabel = daysAgo <= 0 ? 'Last reading today'
+    : daysAgo === 1 ? 'Last reading yesterday'
+    : `Last reading ${daysAgo} days ago`;
+
   return `
     <div class="card hub-card hub-body">
       <div class="hub-card-head">
         <span class="hub-card-title">Body composition</span>
         <span class="hub-card-meta">${escHtml(bcLongDate(latest.date))}</span>
       </div>
+      <p class="hub-body-freshness${staleReading ? ' hub-body-freshness-stale' : ''}">${escHtml(freshnessLabel)}</p>
       <div class="hub-body-figures">
         <div class="hub-figure">
           <span class="hub-figure-label">Weight</span>
@@ -2310,6 +2365,14 @@ function renderToday() {
   document.getElementById('session-name').textContent =
     dayPlan.sessionName || (dayPlan.isRest ? 'Extra Session' : 'Session');
 
+  // Session-level note (one per training day, keyed by date in meta). Populated
+  // from the viewed date so a past session shows that day's note; the input's
+  // dataset.date tells the (once-wired) blur handler which key to write.
+  const sessionNoteInput = document.getElementById('session-note-input');
+  sessionNoteInput.value = state.meta[`sessionNote_${viewDate}`]?.value ?? '';
+  sessionNoteInput.dataset.date = viewDate;
+  sessionNoteInput.disabled = isFutureDate;
+
   const completedCount = allExercises.filter(ex =>
     isExerciseComplete(ex.id, viewDate, ex.sets)
   ).length;
@@ -2431,6 +2494,13 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
                aria-label="${isTimed ? 'Seconds' : 'Reps'}, set ${i + 1}"
                data-field="reps" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
                ${disabledAttr} />
+        <input class="set-input set-rpe"
+               type="number" inputmode="decimal" step="0.5" min="${RPE_MIN}" max="${RPE_MAX}"
+               placeholder="RPE"
+               value="${log?.rpe ?? ''}"
+               aria-label="RPE (optional), set ${i + 1}"
+               data-field="rpe" data-ex-id="${escHtml(ex.id)}" data-set-index="${i}"
+               ${disabledAttr} />
         ${timerBtn}
         <button class="set-check"
                 aria-label="Mark set ${i + 1} done"
@@ -2508,7 +2578,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
           <div class="sets-table-header${headVariant}">
             <span>Set</span><span>Previous</span>
             ${hasLoad ? `<span>${escHtml(loadCol.label)}</span>` : ''}
-            <span>${isTimed ? 'Sec' : 'Reps'}</span>${isTimed ? '<span></span>' : ''}<span></span>
+            <span>${isTimed ? 'Sec' : 'Reps'}</span><span>RPE</span>${isTimed ? '<span></span>' : ''}<span></span>
           </div>
           ${setsRows}
         </div>
@@ -2644,6 +2714,13 @@ function wireExerciseCards(exercises, date) {
       if (!raw) return;
       const num = parseFloat(raw);
       if (isNaN(num) || num < 0) return;
+      if (field === 'rpe') {
+        // Store only within the sane RPE domain, snapped to 0.5. Out-of-range
+        // input is silently not stored — never an error, and blank stays valid.
+        if (num < RPE_MIN || num > RPE_MAX) return;
+        writeLog(date, exId, setIndex, { rpe: Math.round(num * 2) / 2 });
+        return;
+      }
       const val = field === 'reps' ? Math.round(num) : num;
       writeLog(date, exId, setIndex, { [field]: val });
     });
