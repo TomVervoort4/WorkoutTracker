@@ -43,6 +43,15 @@ const MONTH_NAMES     = [
 const PLAN_DOC_ID          = 'weekly-plan';
 const FINISHED_KEY         = 'finishedSessions';
 
+// Meta key holding the date ('YYYY-MM-DD') of the last successful backup. Stored
+// like any other meta record so it serialises into the snapshot and restores.
+const LAST_BACKUP_KEY = 'lastBackupDate';
+
+// Days since the last backup at which the hub card's wording shifts from a
+// neutral fact to an attention accent. The card's ONLY computation is
+// (today − lastBackupDate) in whole days compared against this threshold.
+const LAST_BACKUP_STALE_DAYS = 14;
+
 // Meta keys from retired features (streak counter, fixed-Monday bodyweight
 // prompt) — silently deleted from the DB on load, never written again.
 const RETIRED_META_KEYS = ['streak', 'bwPromptDate'];
@@ -150,6 +159,13 @@ function isPast(dateStr) {
   return dateStr < state.ui.today;
 }
 
+/** Whole calendar days from `fromStr` to `toStr` (both 'YYYY-MM-DD'). */
+function daysBetweenDates(fromStr, toStr) {
+  const MS_PER_DAY = 86_400_000;
+  // parseDate anchors on local midnight, so rounding absorbs any DST hour.
+  return Math.round((parseDate(toStr) - parseDate(fromStr)) / MS_PER_DAY);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  ID GENERATION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -206,6 +222,7 @@ const state = {
     expandedExerciseId: null,     // exercise ID whose accordion is open, or null
     planDirty: false,             // Plan tab has edits not yet saved to the DB
     _dialogConfirmCallback: null, // pending confirm action
+    _dialogExtraCallback: null,   // pending non-closing extra action (e.g. Back up first)
   },
 };
 
@@ -1224,6 +1241,13 @@ async function init() {
     }
     closeDialog();
   });
+  // The extra action runs WITHOUT closing the dialog, so the confirm stays the
+  // last step (e.g. tap "Back up first", then still face the delete confirm).
+  document.getElementById('dialog-extra-btn').addEventListener('click', () => {
+    if (typeof state.ui._dialogExtraCallback === 'function') {
+      state.ui._dialogExtraCallback();
+    }
+  });
 
   // 10. First paint
   render();
@@ -1376,12 +1400,25 @@ function handleDurationTimerClick(btn, date) {
   }
 }
 
-function showDialog(message, onConfirm, { confirmLabel = 'Confirm', danger = true } = {}) {
+function showDialog(message, onConfirm, { confirmLabel = 'Confirm', danger = true, extraAction = null } = {}) {
   const confirmBtn = document.getElementById('dialog-confirm-btn');
   confirmBtn.textContent = confirmLabel;
   confirmBtn.className   = danger ? 'btn-danger' : 'btn-primary';
   document.getElementById('dialog-inputs').hidden = true;
   document.getElementById('dialog-message').textContent = message;
+
+  // Optional non-closing extra action (e.g. "Back up first"): runs its callback
+  // but leaves the dialog open, so the confirm below remains the final step.
+  const extraBtn = document.getElementById('dialog-extra-btn');
+  if (extraAction) {
+    extraBtn.textContent = extraAction.label;
+    extraBtn.hidden = false;
+    state.ui._dialogExtraCallback = extraAction.onClick;
+  } else {
+    extraBtn.hidden = true;
+    state.ui._dialogExtraCallback = null;
+  }
+
   state.ui._dialogConfirmCallback = onConfirm;
   document.getElementById('dialog-overlay').hidden = false;
   confirmBtn.focus();
@@ -1397,6 +1434,8 @@ function showFormDialog(message, fields, onSubmit, confirmLabel = 'Save') {
   const confirmBtn = document.getElementById('dialog-confirm-btn');
   confirmBtn.textContent = confirmLabel;
   confirmBtn.className   = 'btn-primary';
+  document.getElementById('dialog-extra-btn').hidden = true;
+  state.ui._dialogExtraCallback = null;
   document.getElementById('dialog-message').textContent = message;
 
   const wrap = document.getElementById('dialog-inputs');
@@ -1448,7 +1487,9 @@ function closeDialog() {
   const wrap = document.getElementById('dialog-inputs');
   wrap.innerHTML = '';
   wrap.hidden = true;
+  document.getElementById('dialog-extra-btn').hidden = true;
   state.ui._dialogConfirmCallback = null;
+  state.ui._dialogExtraCallback = null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2001,6 +2042,44 @@ function buildHubPlateaus() {
 }
 
 /**
+ * Addition 6 — a quiet "last backup" recency card. Its only computation is
+ * (today − lastBackupDate) in whole days, compared against LAST_BACKUP_STALE_DAYS.
+ * Neutral by default; the days count takes an attention accent only once stale;
+ * a first-run invitation when nothing has ever been backed up. It states the
+ * fact — never a command — and tapping it runs the export.
+ */
+function buildHubLastBackup() {
+  const last = state.meta[LAST_BACKUP_KEY]?.value;
+
+  // First run — no backup ever recorded: a calm invitation, like other empty
+  // states, not a warning.
+  if (!last) {
+    return `
+      <button class="card hub-card hub-backup" data-hub-action="export">
+        <div class="hub-card-head">
+          <span class="hub-card-title">Backup</span>
+        </div>
+        <p class="hub-backup-line">No backup yet — tap to save an off-device copy.</p>
+      </button>`;
+  }
+
+  const days  = daysBetweenDates(last, state.ui.today);
+  const stale = days >= LAST_BACKUP_STALE_DAYS;
+  const label = days <= 0 ? 'Last backup today'
+    : days === 1 ? 'Last backup yesterday'
+    : `Last backup ${days} days ago`;
+
+  return `
+    <button class="card hub-card hub-backup" data-hub-action="export">
+      <div class="hub-card-head">
+        <span class="hub-card-title">Backup</span>
+        <span class="hub-card-meta">${escHtml(friendlyDateLabel(last))}</span>
+      </div>
+      <p class="hub-backup-line${stale ? ' hub-backup-stale' : ''}">${escHtml(label)}</p>
+    </button>`;
+}
+
+/**
  * The "key lift" for the strength-vs-bodyweight overlay: the weighted exercise
  * with the most logged sessions (tie-break by name). Deterministic; null when
  * no weighted lift has enough history.
@@ -2142,6 +2221,7 @@ function renderHub() {
     buildHubStrengthBodyweight(days) +
     buildHubPRs() +
     buildHubPlateaus() +
+    buildHubLastBackup() +
     buildHubQuickActions();
 
   wireHub();
@@ -3149,7 +3229,12 @@ function buildWeeklyVolumeData() {
 
   for (const log of state.logs) {
     if (!log.done || !log.weight || !log.reps) continue;
-    if (getExerciseLoadType(log.exerciseId) !== 'weighted') continue;
+    // Resolve through the alias map so a fragmented movement reads its loadType
+    // under one canonical id — matching every other read path (PRs, plateaus,
+    // history, "Previous"). Weekly totals are unchanged: volume is weight×reps
+    // regardless of id, and aliased ids share the canonical's loadType.
+    const exId = canonicalExerciseId(log.exerciseId);
+    if (getExerciseLoadType(exId) !== 'weighted') continue;
     const slot = weeks.find(w => w.weekStr === isoWeekStr(parseDate(log.date)));
     if (!slot) continue;
     const type = sessionTypeForDate(log.date);
@@ -4190,7 +4275,7 @@ async function handleSavePlan() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function renderData() {
-  document.getElementById('app-version').textContent = 'v1.0.0';
+  showAppVersion();
   renderStorageStatus();
   // Serialise a fresh snapshot now so Back up can call share() synchronously.
   prepareBackupSnapshot();
@@ -4203,6 +4288,41 @@ function renderData() {
     card.hidden = orphanCount === 0;
     btn.textContent = `Name ${orphanCount} unnamed exercise${orphanCount === 1 ? '' : 's'}`;
   }
+}
+
+/**
+ * Ask the active service worker for its CACHE_VERSION and show it as the app
+ * version. The SW's constant is the single source of truth (see its `message`
+ * handler); the page never hardcodes a number. When no SW controls the page yet
+ * — first load before activation, or a browser without service workers — the
+ * readout is left blank rather than showing a fake/stale version.
+ */
+async function showAppVersion() {
+  const el = document.getElementById('app-version');
+  if (!el) return;
+  el.textContent = (await requestServiceWorkerVersion()) ?? '';
+}
+
+/** The active SW's CACHE_VERSION via a MessageChannel round-trip, or null. */
+function requestServiceWorkerVersion() {
+  return new Promise((resolve) => {
+    const sw = navigator.serviceWorker?.controller;
+    if (!sw) { resolve(null); return; }
+
+    const channel = new MessageChannel();
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+    channel.port1.onmessage = (e) => done(e.data?.version ?? null);
+    // Guard against a SW that never answers so the readout can't hang blank.
+    setTimeout(() => done(null), 1000);
+
+    try {
+      sw.postMessage({ type: 'GET_VERSION' }, [channel.port2]);
+    } catch {
+      done(null);
+    }
+  });
 }
 
 /**
@@ -4230,7 +4350,7 @@ async function renderStorageStatus() {
     dot.className = `storage-status-dot ${persisted ? 'storage-status-on' : 'storage-status-off'}`;
     text.textContent = persisted
       ? 'Storage protected from automatic eviction. Keep exporting anyway.'
-      : 'Storage not protected — the browser may evict it. Export regularly.';
+      : 'Storage protection isn’t confirmed on this browser. Keep an off-device backup.';
   } catch {
     dot.className = 'storage-status-dot storage-status-unknown';
     text.textContent = 'Storage protection state unavailable.';
@@ -4333,7 +4453,7 @@ function handleExport() {
     // files payload that also carries title/text with NotAllowedError even when
     // canShare() said yes, so we send the leanest possible payload.
     navigator.share({ files: [file] })
-      .then(() => showToast('Backup ready — save it to Drive.'))
+      .then(() => { recordBackupDate(); showToast('Backup ready — save it to Drive.'); })
       .catch(err => {
         // A cancelled share sheet is not an error — leave the user be.
         if (err?.name === 'AbortError') return;
@@ -4380,7 +4500,27 @@ function downloadBackup(json, dateStr) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+  recordBackupDate();
   showToast('Backup downloaded.');
+}
+
+/**
+ * Stamp today as the last-backup date after a successful share or download.
+ * Not called on an aborted share or a failure. Written as a normal meta record
+ * so it round-trips through the JSON snapshot. Idempotent within a day (no
+ * repeated writes), and refreshes the hub card if it's mounted.
+ */
+async function recordBackupDate() {
+  const today = todayStr();
+  if (state.meta[LAST_BACKUP_KEY]?.value === today) return; // already stamped today
+  const doc = { key: LAST_BACKUP_KEY, value: today };
+  try {
+    await put('meta', doc);
+    state.meta[LAST_BACKUP_KEY] = doc;
+    if (document.getElementById('hub-content')) renderHub();
+  } catch (err) {
+    console.error('[FitTrack] Could not record backup date:', err);
+  }
 }
 
 /** Records from `list` whose `keyField` value isn't already in `have`. */
@@ -4438,7 +4578,12 @@ async function handleImport(event) {
         const text    = await file.text();
         const payload = JSON.parse(text);
 
-        if (!payload.version || !payload.plan || !Array.isArray(payload.logs)) {
+        // Structure-only guard: a valid backup needs a plan and a logs array.
+        // `version` is deliberately NOT required — buildBackupPayload stamps
+        // v2, but the merge below tolerates v1/version-less files (absent
+        // `bodyComposition`/`meta` simply contribute nothing), so an older or
+        // hand-edited export must still restore.
+        if (!payload.plan || !Array.isArray(payload.logs)) {
           throw new Error('Unrecognised FitTrack backup format.');
         }
 
@@ -4492,8 +4637,12 @@ async function handleImport(event) {
 }
 
 async function handleClearData() {
+  // IndexedDB is a wipeable cache; the only durable copy is the off-device JSON
+  // snapshot. So offer a one-tap backup (the existing export) before the
+  // destructive confirm. "Back up first" runs the export and leaves this dialog
+  // open; declining it still lands on the same delete confirm below.
   showDialog(
-    'Delete ALL workouts, logs, body-composition readings, and settings? This cannot be undone.',
+    'Delete ALL workouts, logs, body-composition readings, and settings? This cannot be undone. Back up first if you want an off-device copy.',
     async () => {
       try {
         await Promise.all([
@@ -4518,6 +4667,7 @@ async function handleClearData() {
         console.error('[FitTrack] Clear failed:', err);
         showToast('Failed to clear data.');
       }
-    }
+    },
+    { confirmLabel: 'Clear All Data', extraAction: { label: 'Back up first', onClick: handleExport } }
   );
 }

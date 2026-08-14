@@ -1611,6 +1611,11 @@ a { color: var(--color-accent); text-decoration: none; }
   height: 44px;
 }
 
+/* Optional extra action (e.g. "Back up first" before Clear all) sits on its own
+   full-width row above the Cancel/Confirm pair, so the destructive confirm stays
+   the last step rather than being crowded into the two-button grid. */
+#dialog-extra-btn { grid-column: 1 / -1; }
+
 /* ═══════════════════════════════════════════════════════
    UTILITY / HIDDEN
 ═══════════════════════════════════════════════════════ */
@@ -2842,6 +2847,14 @@ button.hub-card:hover { border-color: var(--color-border-muted); }
   color: var(--color-secondary);
   line-height: 1.5;
 }
+
+/* Last-backup recency line — quiet fact by default; amber only once stale. */
+.hub-backup-line {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.hub-backup-line.hub-backup-stale { color: var(--color-warning); }
 
 /* Metric qualifier beside a PR value (e.g. "e1RM") — quiet, not the headline. */
 .hub-pr-metric {

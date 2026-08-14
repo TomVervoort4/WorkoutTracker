@@ -84,6 +84,16 @@ self.addEventListener("install", (event) => {
   );
 });
 
+// Single source of truth for the displayed app version: the page asks the
+// active service worker for its CACHE_VERSION over a MessageChannel and shows
+// whatever it replies. Keeping the constant here (not duplicated in the page)
+// means the Data-tab readout can never drift from the actually-deployed cache.
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "GET_VERSION") {
+    event.ports[0]?.postMessage({ version: CACHE_VERSION });
+  }
+});
+
 // Remove stale caches from previous versions on activate
 self.addEventListener("activate", (event) => {
   event.waitUntil(

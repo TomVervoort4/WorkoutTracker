@@ -417,4 +417,11 @@ export {
   computeExerciseSeries,
   getExercisePR,
   isCompoundExercise,
+  // Additionally exported for the standalone regression test (insights.test.mjs).
+  // Pure helpers with no app coupling; exporting them lets the test check each
+  // in isolation rather than only through the aggregate hub functions.
+  canonId,
+  epley1RM,
+  sessionMetric,
+  sessionsSinceImprovement,
 };
