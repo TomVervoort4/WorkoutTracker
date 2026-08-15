@@ -61,6 +61,12 @@ const BODY_COMP_STALE_DAYS = 14;
 const RPE_MIN = 6;
 const RPE_MAX = 10;
 
+// Whether best-effort haptics fire. User-toggleable in Settings, default ON,
+// stored like any other meta record. Absent = on; only an explicit `false`
+// disables. The Vibration API is unsupported on iOS Safari, so every call is
+// wrapped to no-op silently there — this key only governs the user's choice.
+const HAPTICS_KEY = 'hapticsEnabled';
+
 // Meta keys from retired features (streak counter, fixed-Monday bodyweight
 // prompt) — silently deleted from the DB on load, never written again.
 const RETIRED_META_KEYS = ['streak', 'bwPromptDate'];
@@ -1043,6 +1049,8 @@ function switchView(viewName) {
 /** Open the header settings menu (Data & Library live here now). */
 function openSettings() {
   const overlay = document.getElementById('settings-overlay');
+  // Reflect the stored haptics choice each time the menu opens.
+  document.getElementById('haptics-toggle')?.setAttribute('aria-checked', String(hapticsEnabled()));
   overlay.hidden = false;
   overlay.querySelector('.settings-menu-item')?.focus();
 }
@@ -1220,6 +1228,8 @@ function wireStaticListeners() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !document.getElementById('settings-overlay').hidden) closeSettings();
   });
+  const hapticsToggle = document.getElementById('haptics-toggle');
+  hapticsToggle.addEventListener('click', () => toggleHaptics(hapticsToggle));
 
   // 5. Body tab — Fitdays import. The visible button drives the hidden file
   //    input so the control is keyboard-focusable and styled like the app.
@@ -1379,6 +1389,45 @@ function escHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  HAPTICS — best-effort, gated, silent when unavailable
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** True unless the user has explicitly turned haptics off (default on). */
+function hapticsEnabled() {
+  return state.meta[HAPTICS_KEY]?.value !== false;
+}
+
+/**
+ * Fire a short haptic tap. A no-op — never an error — when the user has haptics
+ * off, when the browser has no Vibration API (iOS Safari), or if the call
+ * throws. Patterns are kept short (single 10–20ms taps or a brief double) so it
+ * reads as a click, not an alarm. Reserved for the four meaningful moments only
+ * (set done, PR, rest-zero); never wired to navigation, scrolling, or typing.
+ */
+function haptic(pattern) {
+  if (!hapticsEnabled()) return;
+  try { navigator.vibrate?.(pattern); } catch { /* absent/blocked — silent */ }
+}
+
+/**
+ * Flip the haptics setting and persist it to meta. Reflects into `state.meta`
+ * immediately so the confirming tap (when turning ON) already respects it, and
+ * updates the toggle's aria-checked. Storage only — no data-model change.
+ */
+async function toggleHaptics(btn) {
+  const next = !hapticsEnabled();
+  const doc  = { key: HAPTICS_KEY, value: next };
+  state.meta[HAPTICS_KEY] = doc;
+  btn.setAttribute('aria-checked', String(next));
+  if (next) haptic(15); // a single confirming tap when switching haptics on
+  try {
+    await put('meta', doc);
+  } catch (err) {
+    console.error('[FitTrack] Could not save haptics setting:', err);
+  }
+}
+
 let _toastTimer = null;
 
 function showToast(message, duration = 2800) {
@@ -1418,17 +1467,43 @@ function startRestTimer() {
   updateRestTimerDisplay();
   _restTimer.interval = setInterval(() => {
     if (updateRestTimerDisplay() <= 0) {
-      stopRestTimer();
-      navigator.vibrate?.(200);
-      showToast('Rest over — next set!');
+      clearInterval(_restTimer.interval);
+      _restTimer.interval = null;
+      restTimerComplete();
     }
   }, 1000);
+}
+
+/**
+ * Rest countdown reached zero — a genuinely useful signal (the user is looking
+ * away from the phone). A clear haptic pulse plus ONE calm accent pulse on the
+ * still-visible bar, then it hides. Only fires at zero, never mid-countdown.
+ */
+function restTimerComplete() {
+  haptic([20, 60, 20]);
+  showToast('Rest over — next set!');
+
+  const bar = document.getElementById('rest-timer');
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    bar.classList.remove('rest-timer-done');
+    stopRestTimer();
+  };
+  // Pulse the bar once, then hide it when the pulse resolves. The setTimeout is
+  // the fallback that also covers reduced-motion (where the animation is flat).
+  bar.classList.add('rest-timer-done');
+  bar.addEventListener('animationend', finish, { once: true });
+  setTimeout(finish, 450);
 }
 
 function stopRestTimer() {
   clearInterval(_restTimer.interval);
   _restTimer.interval = null;
-  document.getElementById('rest-timer').hidden = true;
+  const bar = document.getElementById('rest-timer');
+  bar.hidden = true;
+  bar.classList.remove('rest-timer-done');
   document.body.classList.remove('rest-timer-active');
 }
 
@@ -2958,9 +3033,10 @@ async function handleSetCheck(exerciseId, setIndex, date) {
   // Immediate PB surfacing — check the moment a set is marked done. A record is
   // rankable whenever the effort (reps or seconds) is present; weight is only
   // required for weighted work, which checkForNewPB handles per loadType.
+  let isPR = false;
   if (newDone && rVal != null) {
     const pbMessage = await checkForNewPB(state, exerciseId, getExerciseName(exerciseId), loadType, date);
-    if (pbMessage) showToast(pbMessage, 4000);
+    if (pbMessage) { isPR = true; showToast(pbMessage, 4000); }
   }
 
   // Targeted DOM update — avoids clearing any other set's live input values
@@ -2975,6 +3051,18 @@ async function handleSetCheck(exerciseId, setIndex, date) {
       const rInput = setRow.querySelector('.set-reps');
       if (wInput && !wInput.value && wVal != null) wInput.value = wVal;
       if (rInput && !rInput.value && rVal != null) rInput.value = rVal;
+
+      // Feedback for the single most-repeated action: a crisp haptic tap and a
+      // one-shot confirming settle on the row (removed after so a later full
+      // re-render never replays it). A PR earns a distinctly stronger moment —
+      // a double-tap and one cyan glow pulse. Un-checking gets neither.
+      haptic(isPR ? [15, 40, 15] : 15);
+      setRow.classList.add('set-just-logged');
+      setTimeout(() => setRow.classList.remove('set-just-logged'), 220);
+      if (isPR) {
+        setRow.classList.add('set-pr-flash');
+        setTimeout(() => setRow.classList.remove('set-pr-flash'), 420);
+      }
     }
   }
 

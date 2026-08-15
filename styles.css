@@ -202,6 +202,52 @@ a { color: var(--color-accent); text-decoration: none; }
   justify-content: flex-start;
   gap: 12px;
 }
+
+/* Haptics on/off — a single stored setting, styled as a switch. */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 4px 0 16px;
+}
+.settings-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.settings-toggle {
+  flex-shrink: 0;
+  width: 46px;
+  height: 28px;
+  border-radius: 14px;
+  border: 1px solid var(--color-border-muted);
+  background-color: var(--color-surface-2);
+  padding: 2px;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast);
+  -webkit-tap-highlight-color: transparent;
+}
+.settings-toggle[aria-checked="true"] {
+  background-color: var(--color-accent-dim);
+  border-color: var(--color-accent);
+}
+.settings-toggle-knob {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background-color: var(--color-secondary);
+  transition: transform var(--transition-fast), background-color var(--transition-fast);
+}
+.settings-toggle[aria-checked="true"] .settings-toggle-knob {
+  transform: translateX(18px);
+  background-color: var(--color-accent);
+}
+
 /* The settings overlay has a single Close action — let it span the full width. */
 #settings-overlay .dialog-actions {
   grid-template-columns: 1fr;
@@ -612,10 +658,42 @@ body.rest-timer-active .main-content {
   padding: 4px;
   border-radius: var(--radius-sm);
   transition: background-color var(--transition-fast);
+  position: relative; /* anchor for the one-shot PR glow overlay (::after) */
 }
 
 .set-row.set-logged {
   background-color: var(--color-success-dim);
+}
+
+/* Logging a set — a one-shot confirming settle atop the existing green fill, so
+   it reads as "that registered" rather than a flat colour swap. Transform-only
+   (GPU-cheap); flattened to nothing under reduced-motion by the global rule. */
+.set-row.set-just-logged {
+  animation: set-settle 160ms ease;
+}
+@keyframes set-settle {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(0.98); }
+  100% { transform: scale(1); }
+}
+
+/* Hitting a PR — one cyan glow pulse, earned. The glow (box-shadow ring) is
+   static on a pseudo-element; only its OPACITY animates, so it stays on the
+   transform/opacity fast path. Fires once, then resolves to invisible. */
+.set-row.set-pr-flash::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 2px var(--color-accent), 0 0 14px 2px var(--color-accent-glow);
+  pointer-events: none;
+  opacity: 0;
+  animation: pr-glow 380ms ease;
+}
+@keyframes pr-glow {
+  0%   { opacity: 0; }
+  40%  { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 .set-num {
@@ -1512,13 +1590,14 @@ body.rest-timer-active .main-content {
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-muted);
   cursor: pointer;
-  transition: background-color var(--transition-fast);
+  transition: background-color var(--transition-fast), transform var(--transition-fast);
   -webkit-tap-highlight-color: transparent;
   width: fit-content;
 }
 
 .import-label:active {
   background-color: var(--color-border);
+  transform: scale(0.97);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1539,6 +1618,25 @@ body.rest-timer-active .main-content {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   z-index: 150;
   animation: fade-in var(--transition-normal) ease;
+}
+
+/* Rest reached zero — one calm accent pulse (not a flash) on the still-visible
+   bar, then it hides. Static glow ring on a pseudo-element, only opacity
+   animates. Fires once; the global reduced-motion rule flattens it to nothing. */
+.rest-timer.rest-timer-done::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 0 0 2px var(--color-accent), 0 0 18px 3px var(--color-accent-glow);
+  pointer-events: none;
+  opacity: 0;
+  animation: rest-done-pulse 400ms ease;
+}
+@keyframes rest-done-pulse {
+  0%   { opacity: 0; }
+  45%  { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 .rest-timer-label {
@@ -1640,12 +1738,14 @@ body.rest-timer-active .main-content {
   display: flex;
   flex-direction: column;
   gap: 20px;
-  animation: scale-in var(--transition-fast) ease;
+  animation: dialog-rise var(--transition-fast) ease;
 }
 
-@keyframes scale-in {
-  from { transform: scale(0.92); opacity: 0; }
-  to   { transform: scale(1);    opacity: 1; }
+/* Considered tool, not a toy: a quick fade plus a subtle rise, no overshoot.
+   Both the confirm dialog and the settings overlay share this entrance. */
+@keyframes dialog-rise {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
 }
 
 .dialog-message {
