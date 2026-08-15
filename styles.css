@@ -341,23 +341,21 @@ a { color: var(--color-accent); text-decoration: none; }
   bottom: 4px;
 }
 
-/* MISSED — muted red */
-.day-cell.day-missed .day-number {
-  background-color: rgba(110, 64, 64, 0.3);
-  color: var(--color-danger);
+/* UNTRAINED — a past plan-weekday with no session. Model A: a shifted training
+   day is not a failure, so this is a quiet neutral, never red. A small muted dot
+   distinguishes it factually from a plain rest day (which carries no dot). */
+.day-cell.day-untrained .day-number,
+.day-cell.day-untrained .day-letter {
+  color: var(--color-border-muted);
 }
-.day-cell.day-missed .day-letter {
-  color: var(--color-danger);
-  opacity: 0.7;
-}
-.day-cell.day-missed::after {
+.day-cell.day-untrained::after {
   content: '';
   display: block;
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background-color: var(--color-danger);
-  opacity: 0.6;
+  background-color: var(--color-border-muted);
+  opacity: 0.7;
   position: absolute;
   bottom: 4px;
 }
@@ -2835,11 +2833,12 @@ button.hub-card:hover { border-color: var(--color-border-muted); }
 .hub-dot-done       { background-color: var(--color-success); }
 .hub-dot-inprogress { background-color: var(--color-accent); }
 .hub-dot-today      { background-color: var(--color-accent-glow); }
-.hub-dot-missed     { background-color: var(--color-missed); }
+.hub-dot-untrained  { background-color: var(--color-border-muted); }
 .hub-dot-rest       { background-color: var(--color-border); }
 .hub-dot-upcoming   { background-color: var(--color-border-muted); }
 
-/* Notable gaps line (module 5) — factual, shown only when there are misses. */
+/* Weekly-shortfall line (module 5, Model A) — a quiet fact, shown only when the
+   total is > 0. Neutral, not red: a shortfall is stated, not scolded. */
 .hub-gaps {
   display: flex;
   flex-wrap: wrap;
@@ -2851,7 +2850,7 @@ button.hub-card:hover { border-color: var(--color-border-muted); }
 .hub-gaps-count {
   font-size: 12px;
   font-weight: 700;
-  color: var(--color-missed);
+  color: var(--color-text);
 }
 .hub-gaps-detail {
   font-size: 11.5px;

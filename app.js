@@ -1078,7 +1078,14 @@ function renderHeader() {
 
 /**
  * Derives the visual status of a single day cell.
- * Returns: 'done' | 'inprogress' | 'today' | 'missed' | 'rest' | 'upcoming'
+ * Returns: 'done' | 'inprogress' | 'today' | 'untrained' | 'rest' | 'upcoming'
+ *
+ * Model A (weekly quota): there is no per-weekday "missed". A past day is simply
+ * 'done' (a session was logged) or 'untrained' (none) — an untrained day is a
+ * neutral fact, never a failure, because the plan's real goal is a NUMBER of
+ * sessions per week, not the specific weekday. Training Tue instead of Mon is
+ * not a miss. Shortfall (fewer sessions than the weekly target) is computed at
+ * the week level, not here.
  */
 function getDayStatus(dateStr) {
   const today      = state.ui.today;
@@ -1099,11 +1106,13 @@ function getDayStatus(dateStr) {
     return isRestDay ? 'rest' : 'upcoming';
   }
 
-  // Past day
-  if (isRestDay) return 'rest';
+  // Past day — a logged session WINS over the plan's weekday opinion. Training
+  // on a day the plan calls rest (a shifted session) is still 'done' (green);
+  // Model A cares that you trained, not which weekday it landed on.
   const logsOnDay = state.logs.filter(l => l.date === dateStr);
   if (logsOnDay.length > 0) return 'done'; // any logged activity counts
-  return 'missed';
+  if (isRestDay) return 'rest';            // a plan rest day, untrained — neutral
+  return 'untrained';                      // a plan weekday with no session — neutral, not a miss
 }
 
 function renderWeekStrip() {
@@ -1119,7 +1128,7 @@ function renderWeekStrip() {
       'day-cell',
       status === 'done'       ? 'day-done'       : '',
       status === 'inprogress' ? 'day-inprogress' : '',
-      status === 'missed'     ? 'day-missed'      : '',
+      status === 'untrained'  ? 'day-untrained'  : '',
       status === 'rest'       ? 'day-rest'        : '',
       status === 'upcoming'   ? 'day-upcoming'    : '',
       status === 'today'      ? 'day-today'       : '',
@@ -1917,6 +1926,28 @@ function sessionsThisWeek() {
   return state.ui.weekDates.filter(d => dates.has(d)).length;
 }
 
+/**
+ * Model A weekly target: the number of populated (non-rest) days in the plan —
+ * `plan.days` entries with at least one non-archived exercise. Mon/Wed/Fri → 3.
+ * Zero populated days ⇒ target 0 ⇒ nothing is ever flagged short.
+ */
+function weeklyTrainingTarget() {
+  return (state.plan?.days ?? [])
+    .filter(day => (day.exercises ?? []).some(e => !e.archived))
+    .length;
+}
+
+/** Distinct session dates within the Mon–Sun week beginning at `mondayDate`. */
+function sessionsInWeek(mondayDate) {
+  const dates = sessionDatesSet();
+  let n = 0;
+  for (let i = 0; i < 7; i++) {
+    const ds = formatDate(new Date(mondayDate.getFullYear(), mondayDate.getMonth(), mondayDate.getDate() + i));
+    if (dates.has(ds)) n++;
+  }
+  return n;
+}
+
 /** Sessions logged in the current calendar month. */
 function sessionsThisMonth() {
   const ym = state.ui.today.slice(0, 7);
@@ -1953,19 +1984,31 @@ function trainingWeekStreak() {
   return streak;
 }
 
-// Module 5 — a "gap" is a past training day (a non-rest day per the plan) with
-// no logged session, inside this lookback window. Purely factual: the app lists
-// missed expected sessions, it does not judge whether a gap was acceptable.
-const CONSISTENCY_GAP_WINDOW_DAYS = 28;
+// Module 5 (Model A) — a "shortfall" is training fewer sessions in a week than
+// the weekly target, summed over the last N COMPLETE Mon–Sun weeks. The specific
+// weekday is irrelevant; only the weekly count matters. Purely factual — the app
+// states the shortfall, it does not judge whether it was acceptable.
+const CONSISTENCY_LOOKBACK_WEEKS = 4;
 
-/** Past training days with no session logged, within the window, newest first. */
-function recentMissedSessions() {
-  const misses = [];
-  for (let i = 1; i <= CONSISTENCY_GAP_WINDOW_DAYS; i++) {
-    const d = dateStrPlus(state.ui.today, -i);
-    if (getDayStatus(d) === 'missed') misses.push(d);
+/**
+ * Total session shortfall over the last N complete weeks (the current, still
+ * in-progress week is excluded — the user may still train later this week).
+ * Each week contributes `max(0, target − sessions)`; a week over target adds 0,
+ * never a negative to bank. Zero target ⇒ zero shortfall.
+ */
+function recentWeeklyShortfall() {
+  const target = weeklyTrainingTarget();
+  if (target <= 0) return 0;
+
+  const currentMonday = getMondayOf(new Date());
+  let total = 0;
+  for (let w = 1; w <= CONSISTENCY_LOOKBACK_WEEKS; w++) {
+    const mon = new Date(
+      currentMonday.getFullYear(), currentMonday.getMonth(), currentMonday.getDate() - 7 * w
+    );
+    total += Math.max(0, target - sessionsInWeek(mon));
   }
-  return misses;
+  return total;
 }
 
 /**
@@ -2090,15 +2133,14 @@ function buildHubConsistency() {
     return `<span class="hub-dot hub-dot-${status}" title="${escHtml(friendlyDateLabel(d))}"></span>`;
   }).join('');
 
-  // Module 5 — notable gaps: missed expected sessions in the recent window.
-  // Shown only when there are any; the line itself is the signal. Facts only.
-  const misses = recentMissedSessions();
-  const gapsRow = misses.length ? `
+  // Module 5 (Model A) — weekly shortfall over the last few complete weeks. A
+  // week-level fact, not tied to any weekday; shown only when the total is > 0
+  // (hit target every week ⇒ no line). The current week never contributes.
+  const shortfall = recentWeeklyShortfall();
+  const gapsRow = shortfall > 0 ? `
       <div class="hub-gaps">
-        <span class="hub-gaps-count">${misses.length} missed</span>
-        <span class="hub-gaps-detail">last ${CONSISTENCY_GAP_WINDOW_DAYS} days · ${
-          misses.slice(0, 3).map(d => escHtml(friendlyDateLabel(d))).join(', ')
-        }${misses.length > 3 ? ` +${misses.length - 3}` : ''}</span>
+        <span class="hub-gaps-count">${shortfall} session${shortfall === 1 ? '' : 's'} short</span>
+        <span class="hub-gaps-detail">last ${CONSISTENCY_LOOKBACK_WEEKS} weeks</span>
       </div>` : '';
 
   return `
