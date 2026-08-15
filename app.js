@@ -1047,17 +1047,44 @@ function switchView(viewName) {
 }
 
 /** Open the header settings menu (Data & Library live here now). */
+/** Whether the user asked for reduced motion — used to skip exit animations. */
+function prefersReducedMotion() {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+}
+
+/**
+ * Play a quick fade-out on an overlay, then run `hide` (which sets [hidden] and
+ * resets state). A setTimeout fallback GUARANTEES `hide` always runs even if
+ * `animationend` never fires, so an exit animation can never leave an overlay
+ * stuck open. Reduced motion (or an already-hidden overlay) hides instantly.
+ */
+function closeOverlayAnimated(overlay, hide) {
+  if (!overlay || overlay.hidden || prefersReducedMotion()) { hide(); return; }
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    overlay.classList.remove('overlay-closing');
+    hide();
+  };
+  overlay.classList.add('overlay-closing');
+  overlay.addEventListener('animationend', finish, { once: true });
+  setTimeout(finish, 220); // fallback — never leave the overlay stranded
+}
+
 function openSettings() {
   const overlay = document.getElementById('settings-overlay');
+  overlay.classList.remove('overlay-closing'); // clear a mid-exit state on rapid reopen
   // Reflect the stored haptics choice each time the menu opens.
   document.getElementById('haptics-toggle')?.setAttribute('aria-checked', String(hapticsEnabled()));
   overlay.hidden = false;
   overlay.querySelector('.settings-menu-item')?.focus();
 }
 
-/** Close the header settings menu and return focus to the gear. */
+/** Close the header settings menu (quick fade-out) and return focus to the gear. */
 function closeSettings() {
-  document.getElementById('settings-overlay').hidden = true;
+  const overlay = document.getElementById('settings-overlay');
+  closeOverlayAnimated(overlay, () => { overlay.hidden = true; });
   document.getElementById('settings-btn')?.focus();
 }
 
@@ -1609,7 +1636,9 @@ function showDialog(message, onConfirm, { confirmLabel = 'Confirm', danger = tru
   }
 
   state.ui._dialogConfirmCallback = onConfirm;
-  document.getElementById('dialog-overlay').hidden = false;
+  const overlay = document.getElementById('dialog-overlay');
+  overlay.classList.remove('overlay-closing'); // clear a mid-exit state on rapid reopen
+  overlay.hidden = false;
   confirmBtn.focus();
 }
 
@@ -1667,18 +1696,23 @@ function showFormDialog(message, fields, onSubmit, confirmLabel = 'Save') {
     onSubmit(values);
   };
 
-  document.getElementById('dialog-overlay').hidden = false;
+  const overlay = document.getElementById('dialog-overlay');
+  overlay.classList.remove('overlay-closing'); // clear a mid-exit state on rapid reopen
+  overlay.hidden = false;
   wrap.querySelector('.dialog-input')?.focus();
 }
 
 function closeDialog() {
-  document.getElementById('dialog-overlay').hidden = true;
-  const wrap = document.getElementById('dialog-inputs');
-  wrap.innerHTML = '';
-  wrap.hidden = true;
-  document.getElementById('dialog-extra-btn').hidden = true;
-  state.ui._dialogConfirmCallback = null;
-  state.ui._dialogExtraCallback = null;
+  const overlay = document.getElementById('dialog-overlay');
+  closeOverlayAnimated(overlay, () => {
+    overlay.hidden = true;
+    const wrap = document.getElementById('dialog-inputs');
+    wrap.innerHTML = '';
+    wrap.hidden = true;
+    document.getElementById('dialog-extra-btn').hidden = true;
+    state.ui._dialogConfirmCallback = null;
+    state.ui._dialogExtraCallback = null;
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

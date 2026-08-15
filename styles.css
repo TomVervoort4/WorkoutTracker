@@ -423,6 +423,25 @@ body.rest-timer-active .main-content {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* Reusable content entrance — a container's direct children fade-and-rise in
+   with a small, capped stagger so a view assembles rather than snapping. Applied
+   to the Today exercise stack and the Progress history list (the hub has its own
+   `.hub > *` stagger). transform/opacity only. The stagger is CAPPED at the 6th
+   item so a long list never cascades slowly, and the global reduced-motion block
+   zeroes both the duration and the delay so nothing is ever held back invisibly. */
+@keyframes item-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.stagger-children > * {
+  animation: item-rise 200ms ease both;
+}
+.stagger-children > *:nth-child(2) { animation-delay: 35ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 70ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 105ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 140ms; }
+.stagger-children > *:nth-child(n+6) { animation-delay: 175ms; } /* cap: 6th+ arrive together */
+
 /* ═══════════════════════════════════════════════════════
    CARD BASE
 ═══════════════════════════════════════════════════════ */
@@ -670,9 +689,8 @@ body.rest-timer-active .main-content {
   animation: set-settle 160ms ease;
 }
 @keyframes set-settle {
-  0%   { transform: scale(1); }
-  35%  { transform: scale(0.98); }
-  100% { transform: scale(1); }
+  from { transform: scale(0.97); }
+  to   { transform: scale(1); }
 }
 
 /* Hitting a PR — one cyan glow pulse, earned. The glow (box-shadow ring) is
@@ -1746,6 +1764,23 @@ body.rest-timer-active .main-content {
   to   { transform: translateY(0);   opacity: 1; }
 }
 
+/* …and an equally quick exit — a clean fade + subtle sink, no bounce. Applied by
+   JS (closeOverlayAnimated) while the overlay animates out, then it hides. */
+.dialog-overlay.overlay-closing {
+  animation: overlay-out var(--transition-fast) ease forwards;
+}
+.dialog-overlay.overlay-closing .dialog-box {
+  animation: dialog-sink var(--transition-fast) ease forwards;
+}
+@keyframes overlay-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes dialog-sink {
+  from { transform: translateY(0);   opacity: 1; }
+  to   { transform: translateY(6px);  opacity: 0; }
+}
+
 .dialog-message {
   font-size: 15px;
   font-weight: 500;
@@ -1859,6 +1894,10 @@ body.rest-timer-active .main-content {
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+    /* Zero every animation delay too — otherwise a staggered entrance would hold
+       its item invisible (fill-mode) for the delay before snapping in. With the
+       delay gone, all staggered content appears at once, instantly. */
+    animation-delay: 0s !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
@@ -2633,9 +2672,10 @@ body.rest-timer-active .main-content {
   gap: 12px;
 }
 
-/* Staggered gentle load-in — each card eases up in turn. */
+/* Staggered gentle load-in — each card eases up in turn. Kept in the calibrated
+   ~200ms entrance range so cards arrive promptly, never held back for effect. */
 .hub > * {
-  animation: hub-rise var(--transition-slow) both;
+  animation: hub-rise var(--transition-normal) both;
 }
 .hub > *:nth-child(1) { animation-delay: 0ms; }
 .hub > *:nth-child(2) { animation-delay: 45ms; }
