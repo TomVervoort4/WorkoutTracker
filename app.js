@@ -1164,43 +1164,38 @@ function handleBackToToday() {
 //  INITIALISATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function init() {
-  // 0. Ask the browser to protect IndexedDB from eviction under storage
-  //    pressure — all training history lives there with no server copy.
-  navigator.storage?.persist?.().catch(() => {});
+/**
+ * Surfaces an init/setup failure instead of letting it strand the app silently.
+ * The original "gear does nothing on phone" bug was exactly this: an awaited
+ * step rejected, init aborted with no trace, and every later listener binding
+ * was skipped. Anything that can fail during boot routes here so it's both
+ * logged and visible on screen — a dead button is no longer the only symptom.
+ */
+function reportInitError(context, err) {
+  console.error(`[FitTrack] ${context} failed during startup:`, err);
+  try {
+    showToast(`${context} had a problem — some data may be incomplete. See console.`);
+  } catch { /* toast unavailable this early — the console line above still lands */ }
+}
 
-  // 1. Resolve today's position in the calendar
-  const today      = todayStr();
-  const weekDates  = weekDatesOf(new Date());
-  state.ui.today         = today;
-  state.ui.weekDates     = weekDates;
-  state.ui.todayDayIndex = dayIndexOf(today);
-  state.ui.viewedDate    = today;
+/** Runs one boot step so a single failure can't abort the whole init sequence. */
+async function runSetupStep(label, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    reportInitError(label, err);
+  }
+}
 
-  // 2. Pull everything out of IndexedDB (and the vendored exercise library +
-  //    the open reference dataset / id-map, both static app content held in
-  //    memory only — never IndexedDB, never the export).
-  await Promise.all([
-    loadState(),
-    loadExerciseLibrary(),
-    loadReference(),
-    loadExerciseMap(),
-    loadExerciseAliases(),
-  ]);
-
-  // 3. Write defaults to the DB on the very first launch
-  await seedIfFirstRun();
-
-  // 3b. Drop retired streak / Monday-prompt meta, ensure every exercise
-  //     definition has a unit ('reps' | 'seconds'), correct the stale
-  //     incline-DB label (id preserved, only the name/cue fixed), and type
-  //     every library-matched exercise (loadType) so PR/plateau logic branches
-  //     on measurement type instead of the exercise name.
-  await dropRetiredMeta();
-  await migrateExerciseUnits();
-  await migrateInclineDbLabel();
-  await migrateExerciseLoadTypes();
-
+/**
+ * Binds every static-DOM event listener. Called BEFORE any awaited data work so
+ * that a data-load or migration failure can never strand the nav or the header
+ * settings gear — that was the phone-only bug. None of these handlers read data
+ * at bind time; they fire on user interaction, by which point the data has
+ * loaded (or failed loudly), so binding them first is always safe. All the
+ * referenced elements are static in index.html and present at DOMContentLoaded.
+ */
+function wireStaticListeners() {
   // 4. Bottom tab navigation
   document.querySelectorAll('.nav-tab').forEach(btn => {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
@@ -1208,6 +1203,9 @@ async function init() {
 
   // 4b. Header settings menu — reaches the Data and Library views that left the
   //     primary nav. The views themselves are unchanged; only how they're opened.
+  //     This binding intentionally runs before any data work: opening the menu
+  //     only toggles the overlay's `hidden` attribute and calls switchView, so
+  //     it must stay live even if IndexedDB setup fails entirely.
   document.getElementById('settings-btn').addEventListener('click', openSettings);
   document.getElementById('settings-close-btn').addEventListener('click', closeSettings);
   document.querySelectorAll('.settings-menu-item').forEach(btn => {
@@ -1292,18 +1290,77 @@ async function init() {
   // value and dataset.date current. Persists on blur against the viewed date.
   const sessionNoteInput = document.getElementById('session-note-input');
   sessionNoteInput.addEventListener('blur', () => saveSessionNote(sessionNoteInput));
+}
 
-  // 10. First paint
-  render();
+async function init() {
+  // 1. Resolve today's position in the calendar (synchronous — never touches
+  //    IndexedDB, so it cannot be the thing that fails).
+  const today      = todayStr();
+  const weekDates  = weekDatesOf(new Date());
+  state.ui.today         = today;
+  state.ui.weekDates     = weekDates;
+  state.ui.todayDayIndex = dayIndexOf(today);
+  state.ui.viewedDate    = today;
 
-  // 11. Surface any anonymous historical exercise ids for naming — once, unless
+  // 2. Wire ALL static UI listeners UP FRONT, before any awaited data work.
+  //    This is the core of the phone-gear fix: the nav and settings gear are
+  //    live even if the data load or a migration below throws.
+  wireStaticListeners();
+
+  // 3. Ask the browser to protect IndexedDB from eviction under storage
+  //    pressure — all training history lives there with no server copy.
+  navigator.storage?.persist?.().catch(() => {});
+
+  // 4. Pull everything out of IndexedDB (and the vendored exercise library +
+  //    the open reference dataset / id-map, static app content held in memory
+  //    only). Guarded: a load failure surfaces visibly but still lets the UI
+  //    boot with the safe empty-state defaults on `state`.
+  try {
+    await Promise.all([
+      loadState(),
+      loadExerciseLibrary(),
+      loadReference(),
+      loadExerciseMap(),
+      loadExerciseAliases(),
+    ]);
+  } catch (err) {
+    reportInitError('Loading your data', err);
+  }
+
+  // 5. Seed defaults on first launch, then run migrations: drop retired meta,
+  //    ensure every exercise has a unit, fix the stale incline-DB label, and
+  //    type library-matched exercises. Each step is INDIVIDUALLY non-fatal —
+  //    one hitting an unexpected record must not abort the boot or take the UI
+  //    (the settings gear included) down with it.
+  await runSetupStep('First-run setup', seedIfFirstRun);
+  await runSetupStep('Cleaning up old settings', dropRetiredMeta);
+  await runSetupStep('Exercise-unit migration', migrateExerciseUnits);
+  await runSetupStep('Incline-DB label fix', migrateInclineDbLabel);
+  await runSetupStep('Load-type migration', migrateExerciseLoadTypes);
+
+  // 6. First paint — guarded so a render error can't strand the already-wired UI.
+  try {
+    render();
+  } catch (err) {
+    reportInitError('Rendering', err);
+  }
+
+  // 7. Surface any anonymous historical exercise ids for naming — once, unless
   //     re-opened manually from the Data tab. Deferred so it never blocks paint.
-  if (!state.meta[ORPHAN_REVIEW_DONE_KEY] && findOrphanExerciseIds().length > 0) {
-    setTimeout(() => openOrphanReview(), 400);
+  try {
+    if (!state.meta[ORPHAN_REVIEW_DONE_KEY] && findOrphanExerciseIds().length > 0) {
+      setTimeout(() => openOrphanReview(), 400);
+    }
+  } catch (err) {
+    reportInitError('Orphan review', err);
   }
 }
 
-document.addEventListener('DOMContentLoaded', init);
+// Final safety net: init() is internally guarded, but a `.catch()` here means a
+// rejection can never again strand the app without a trace.
+document.addEventListener('DOMContentLoaded', () => {
+  init().catch(err => reportInitError('Startup', err));
+});
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  PART 2 — renders, event handlers, charts, plan editing, data I/O
