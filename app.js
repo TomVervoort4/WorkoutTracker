@@ -33,6 +33,37 @@ import {
 //  CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Chart colours, read from the CSS custom properties rather than repeated as
+ * hex literals in the SVG builders below. Before this, the same hue was written
+ * out by hand in three places and drifted: cyan meant "lean mass" on one hub
+ * card and "back squat" on the next, and the volume chart used a fifth and
+ * sixth hue that existed nowhere else in the app. Keeping them in :root means
+ * the palette is stated once, and the SVG builders and the CSS-drawn legends
+ * are guaranteed to agree.
+ *
+ * Read once and memoised: these are static tokens, and the SVG builders call
+ * for them inside per-point loops where a getComputedStyle each time would be
+ * wasteful. See the --chart-* block in styles.css for why these four.
+ */
+const CHART_COLORS = (() => {
+  let cache = null;
+  return () => {
+    if (cache) return cache;
+    const cs = getComputedStyle(document.documentElement);
+    const v = (n, fallback) => cs.getPropertyValue(n).trim() || fallback;
+    cache = {
+      series: [v('--chart-1', '#13A7A6'), v('--chart-2', '#616FFE'),
+               v('--chart-3', '#F8495F'), v('--chart-4', '#D059D5')],
+      other:  v('--chart-other', '#8B949E'),
+      grid:   v('--chart-grid',  '#21262D'),
+      axis:   v('--chart-axis',  '#8B949E'),
+      accent: v('--color-accent', '#00F0FF'),
+    };
+    return cache;
+  };
+})();
+
 const DAY_NAMES_LONG  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const DAY_NAMES_SHORT = ['M','T','W','T','F','S','S'];
 const MONTH_NAMES     = [
@@ -167,6 +198,17 @@ function dayIndexOf(dateStr) {
 function friendlyDateLabel(dateStr) {
   const d = parseDate(dateStr);
   return `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`;
+}
+
+/**
+ * "Jun 15" axis label. The two SVG charts in this file used
+ * formatDate(d).slice(5), which renders "06-15" — while the body-composition
+ * charts one card away render "Jun 15". Two date formats on adjacent cards in
+ * the same scroll is exactly the kind of drift that makes an app feel
+ * assembled rather than designed, so both now speak the same way.
+ */
+function axisDateLabel(d) {
+  return `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
 }
 
 /** Returns true if dateStr is before todayStr. */
@@ -1022,7 +1064,7 @@ function switchView(viewName) {
   // Plan edits only persist on explicit Save — confirm before discarding them
   if (state.ui.currentView === 'plan' && state.ui.planDirty) {
     showDialog('You have unsaved plan changes. Discard them?', () => {
-      state.ui.planDirty = false;
+      setPlanDirty(false);
       switchView(viewName);
     });
     return;
@@ -2406,38 +2448,60 @@ function pickKeyLift() {
  * bodyweight, for reading together. DISPLAY ONLY, by design: the app places two
  * existing series on one time axis and nothing more. It does not pair sessions
  * to weigh-ins, compute a correlation, or exclude shoot days — that reasoning
- * stays in the Claude analysis layer. Dual y-axes (bodyweight left, e1RM right)
- * because the two live on different scales. Renders nothing without both series.
+ * stays in the Claude analysis layer.
+ *
+ * Scaling: both series share ONE kilogram-per-pixel scale, each centred on its
+ * own midpoint — the same treatment the recomposition chart uses, and for the
+ * same reason. Previously each line was normalised to its own min/max, which
+ * stretched a 3kg bodyweight drift and a 26kg strength gain to the identical
+ * height: the two slopes could not be compared, and the point where the lines
+ * crossed was an artefact of independent scaling rather than anything true.
+ * One scale makes the gradients mean the same thing, which is the entire
+ * purpose of drawing them on one timeline. Renders nothing without both series.
  */
 function buildStrengthBodyweightChartSVG(bw, strength, liftName) {
   const W = 320, H = 176;
   const P = { top: 16, right: 40, bottom: 30, left: 40 };
   const cW = W - P.left - P.right;
   const cH = H - P.top  - P.bottom;
-  const BW_COLOR = '#38D39F', S_COLOR = '#00F0FF';
+  // Bodyweight was #38D39F against strength's cyan — a normal-vision ΔE of 13.4,
+  // under the 15 floor, so the two lines were genuinely hard to separate even
+  // with full colour vision. Indigo (--chart-2) lifts that pair to ΔE 33.8.
+  const BW_COLOR = CHART_COLORS().series[1], S_COLOR = CHART_COLORS().accent;
 
   const t = ds => parseDate(ds).getTime();
   const allT = [...bw, ...strength].map(p => t(p.date));
   const tMin = Math.min(...allT), tMax = Math.max(...allT);
   const x = ts => P.left + (tMax === tMin ? cW / 2 : ((ts - tMin) / (tMax - tMin)) * cW);
 
-  const rangeOf = arr => {
+  // One kg-per-pixel scale for both series: the widest span either one covers,
+  // with headroom so neither line touches the frame. minSpan keeps a flat
+  // series from being magnified into noise.
+  const MIN_SPAN_KG = 4;
+  const spanOf = arr => {
     const v = arr.map(p => p.value);
-    let lo = Math.min(...v), hi = Math.max(...v);
-    if (lo === hi) { lo -= 1; hi += 1; }
-    return { lo, hi };
+    return Math.max(...v) - Math.min(...v);
   };
-  const bwR = rangeOf(bw), sR = rangeOf(strength);
-  const yBw = v => P.top + cH - ((v - bwR.lo) / (bwR.hi - bwR.lo)) * cH;
-  const yS  = v => P.top + cH - ((v - sR.lo) / (sR.hi - sR.lo)) * cH;
+  const centreOf = arr => {
+    const v = arr.map(p => p.value);
+    return (Math.max(...v) + Math.min(...v)) / 2;
+  };
+  const span = Math.max(spanOf(bw), spanOf(strength), MIN_SPAN_KG) * 1.25;
+  const bwC = centreOf(bw), sC = centreOf(strength);
+  const yOn = centre => v => P.top + cH / 2 - ((v - centre) / span) * cH;
+  const yBw = yOn(bwC);
+  const yS  = yOn(sC);
+  // Axis end labels still read in each series own kg, at the frame edges.
+  const bwR = { lo: bwC - span / 2, hi: bwC + span / 2 };
+  const sR  = { lo: sC  - span / 2, hi: sC  + span / 2 };
 
   const lineOf = (arr, yfn) => arr.map(p => `${x(t(p.date)).toFixed(1)},${yfn(p.value).toFixed(1)}`).join(' ');
   const dotsOf = (arr, yfn, c) => arr.map(p =>
     `<circle cx="${x(t(p.date)).toFixed(1)}" cy="${yfn(p.value).toFixed(1)}" r="2.2" fill="${c}"/>`).join('');
 
   const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
-  const firstLabel = formatDate(new Date(tMin)).slice(5);
-  const lastLabel  = formatDate(new Date(tMax)).slice(5);
+  const firstLabel = axisDateLabel(new Date(tMin));
+  const lastLabel  = axisDateLabel(new Date(tMax));
 
   const legend = `<div class="volume-legend">
       <span class="volume-legend-item"><span class="volume-legend-dot" style="background:${BW_COLOR}"></span>Bodyweight</span>
@@ -2449,9 +2513,9 @@ function buildStrengthBodyweightChartSVG(bw, strength, liftName) {
     <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"
          style="width:100%;display:block;overflow:visible" role="img"
          aria-label="Bodyweight and ${escHtml(liftName)} estimated 1RM on a shared timeline">
-      <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}" stroke="#21262D" stroke-width="1"/>
-      <line x1="${P.left + cW}" y1="${P.top}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="#21262D" stroke-width="1"/>
-      <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="#21262D" stroke-width="1"/>
+      <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}" stroke="${CHART_COLORS().grid}" stroke-width="1"/>
+      <line x1="${P.left + cW}" y1="${P.top}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="${CHART_COLORS().grid}" stroke-width="1"/>
+      <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="${CHART_COLORS().grid}" stroke-width="1"/>
       <polyline points="${lineOf(bw, yBw)}" fill="none" stroke="${BW_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       <polyline points="${lineOf(strength, yS)}" fill="none" stroke="${S_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       ${dotsOf(bw, yBw, BW_COLOR)}
@@ -2461,8 +2525,8 @@ function buildStrengthBodyweightChartSVG(bw, strength, liftName) {
         <text x="${(P.left - 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}" dominant-baseline="middle" text-anchor="end" fill="${BW_COLOR}">${fmt(bwR.lo)}</text>
         <text x="${(P.left + cW + 5).toFixed(1)}" y="${P.top.toFixed(1)}" dominant-baseline="middle" text-anchor="start" fill="${S_COLOR}">${fmt(sR.hi)}</text>
         <text x="${(P.left + cW + 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}" dominant-baseline="middle" text-anchor="start" fill="${S_COLOR}">${fmt(sR.lo)}</text>
-        <text x="${P.left.toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="#8B949E">${escHtml(firstLabel)}</text>
-        <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="#8B949E">${escHtml(lastLabel)}</text>
+        <text x="${P.left.toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="${CHART_COLORS().axis}">${escHtml(firstLabel)}</text>
+        <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="${CHART_COLORS().axis}">${escHtml(lastLabel)}</text>
       </g>
     </svg>`;
 }
@@ -2484,7 +2548,7 @@ function buildHubStrengthBodyweight(days) {
         <span class="hub-card-meta">shared timeline</span>
       </div>
       ${buildStrengthBodyweightChartSVG(bw, strength, lift.name)}
-      <p class="hub-chart-note">Two trends on one axis, for reading together — the app doesn't pair or correlate them.</p>
+      <p class="hub-chart-note">Both series share one kilogram-per-pixel scale on separate offsets, so the two slopes are directly comparable. The app doesn't pair or correlate them.</p>
     </div>`;
 }
 
@@ -3542,7 +3606,10 @@ function renderProgress() {
 }
 
 // Deterministic colour slots for session types, assigned in plan-day order.
-const SESSION_TYPE_COLORS = ['#00F0FF', '#7C5CFF', '#FFB020', '#FF5C7C', '#38D39F', '#8B949E'];
+// Assigned in fixed order and never cycled: a session type past the fourth
+// takes the neutral "other" slot rather than a generated hue, so a colour
+// always identifies the same entity. See the --chart-* block in styles.css.
+const sessionTypeColors = () => [...CHART_COLORS().series, CHART_COLORS().other];
 
 /** The plan's session name for the weekday a date falls on, or 'Other'. */
 function sessionTypeForDate(dateStr) {
@@ -3562,7 +3629,7 @@ function buildWeeklyVolumeData() {
     const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (9 - i) * 7);
     return {
       weekStr: isoWeekStr(d),
-      label:   formatDate(getMondayOf(d)).slice(5), // 'MM-DD'
+      label:   axisDateLabel(getMondayOf(d)), // 'Jun 15' — matches every other chart axis
       byType:  {},
       total:   0,
     };
@@ -3606,7 +3673,11 @@ function buildVolumeChartSVG(weeks) {
   const n  = weeks.length;
 
   const types    = orderedSessionTypes(weeks);
-  const colorOf  = t => SESSION_TYPE_COLORS[types.indexOf(t) % SESSION_TYPE_COLORS.length];
+  const palette  = sessionTypeColors();
+  const colorOf  = t => {
+    const i = types.indexOf(t);
+    return (i >= 0 && i < palette.length - 1) ? palette[i] : palette[palette.length - 1];
+  };
   const maxVol   = Math.max(...weeks.map(w => w.total), 1);
   const barW     = Math.max(Math.floor(cW / n) - 4, 4);
   const gap      = Math.floor((cW - barW * n) / (n - 1 || 1));
@@ -3616,7 +3687,7 @@ function buildVolumeChartSVG(weeks) {
     const x = P.left + i * (barW + gap);
     if (w.total <= 0) {
       return `<rect x="${x.toFixed(1)}" y="${(P.top + cH - 2).toFixed(1)}"
-                    width="${barW}" height="2" rx="1" fill="#21262D"/>`;
+                    width="${barW}" height="2" rx="1" fill="${CHART_COLORS().grid}"/>`;
     }
     let yCursor = P.top + cH;
     return types.map(t => {
@@ -3624,8 +3695,14 @@ function buildVolumeChartSVG(weeks) {
       if (vol <= 0) return '';
       const segH = (vol / maxVol) * cH;
       yCursor -= segH;
+      // A 2px gap in the surface colour separates one session type from the
+      // next. Butted-together fills make a stacked bar read as a single block
+      // with colour changes in it; a hairline of background makes each segment
+      // a countable object. Only inset when the segment can spare the height,
+      // so a thin segment is never shaved out of existence.
+      const inset = segH > 6 ? 2 : 0;
       return `<rect x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}"
-                    width="${barW}" height="${segH.toFixed(1)}"
+                    width="${barW}" height="${(segH - inset).toFixed(1)}"
                     fill="${colorOf(t)}" opacity="0.9"/>`;
     }).join('');
   }).join('');
@@ -3645,11 +3722,11 @@ function buildVolumeChartSVG(weeks) {
          style="width:100%;display:block;overflow:visible"
          role="img" aria-label="Weekly training volume by session type">
       <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}"
-            stroke="#21262D" stroke-width="1"/>
+            stroke="${CHART_COLORS().grid}" stroke-width="1"/>
       <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}"
-            stroke="#21262D" stroke-width="1"/>
+            stroke="${CHART_COLORS().grid}" stroke-width="1"/>
       ${bars}
-      <g font-size="10" fill="#8B949E" font-family="Inter,system-ui,sans-serif">
+      <g font-size="10" fill="${CHART_COLORS().axis}" font-family="Inter,system-ui,sans-serif">
         <text x="${(P.left - 5).toFixed(1)}" y="${P.top.toFixed(1)}"
               dominant-baseline="middle" text-anchor="end">${topTonne}t</text>
         <text x="${(P.left - 5).toFixed(1)}" y="${(P.top + cH * 0.5).toFixed(1)}"
@@ -3687,11 +3764,11 @@ function buildProgressionChartSVG(series) {
 
   const linePts = pts.map((p, i) => `${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
   const dots = pts.map((p, i) =>
-    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="2.5" fill="#00F0FF"/>`).join('');
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="2.5" fill="${CHART_COLORS().accent}"/>`).join('');
 
   const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
-  const firstLabel = formatDate(parseDate(pts[0].date)).slice(5);
-  const lastLabel  = formatDate(parseDate(pts[n - 1].date)).slice(5);
+  const firstLabel = axisDateLabel(parseDate(pts[0].date));
+  const lastLabel  = axisDateLabel(parseDate(pts[n - 1].date));
 
   return `
     <div class="progression-caption">${escHtml(series.metricLabel)}${series.lowerIsBetter ? ' · lower is better' : ''}</div>
@@ -3699,13 +3776,13 @@ function buildProgressionChartSVG(series) {
          style="width:100%;display:block;overflow:visible" role="img"
          aria-label="${escHtml(series.metricLabel)} across ${n} sessions">
       <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}"
-            stroke="#21262D" stroke-width="1"/>
+            stroke="${CHART_COLORS().grid}" stroke-width="1"/>
       <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}"
-            stroke="#21262D" stroke-width="1"/>
-      <polyline points="${linePts}" fill="none" stroke="#00F0FF" stroke-width="2"
+            stroke="${CHART_COLORS().grid}" stroke-width="1"/>
+      <polyline points="${linePts}" fill="none" stroke="${CHART_COLORS().accent}" stroke-width="2"
                 stroke-linejoin="round" stroke-linecap="round"/>
       ${dots}
-      <g font-size="10" fill="#8B949E" font-family="Inter,system-ui,sans-serif">
+      <g font-size="10" fill="${CHART_COLORS().axis}" font-family="Inter,system-ui,sans-serif">
         <text x="${(P.left - 5).toFixed(1)}" y="${P.top.toFixed(1)}"
               dominant-baseline="middle" text-anchor="end">${fmt(dataHi)}</text>
         <text x="${(P.left - 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}"
@@ -4256,13 +4333,25 @@ function closeExerciseDetail() {
 //  PLAN TAB
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Single writer for the plan's dirty flag, so the Save button can state the
+ * pending-changes fact instead of it only surfacing as a confirm dialog when
+ * you try to leave the tab. Every path that used to assign
+ * `state.ui.planDirty` directly goes through here.
+ */
+function setPlanDirty(dirty) {
+  state.ui.planDirty = dirty;
+  document.getElementById('save-plan-btn')
+    ?.classList.toggle('plan-unsaved', dirty);
+}
+
 function renderPlan() {
   const container = document.getElementById('plan-days');
   if (!state.plan) { container.innerHTML = ''; return; }
 
   container.innerHTML = state.plan.days.map(day => buildPlanDayCardHTML(day)).join('');
   wirePlanInteractions();
-  state.ui.planDirty = false; // DOM was just rebuilt from saved state
+  setPlanDirty(false); // DOM was just rebuilt from saved state
 }
 
 /**
@@ -4285,16 +4374,22 @@ function buildPlanExerciseRowHTML(dayIdx, ex) {
                role="combobox" aria-expanded="false" aria-autocomplete="list"
                data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
       </div>
-      <input class="plan-ex-sets" type="number" min="1" max="20"
-             placeholder="Sets"
-             value="${ex.sets}"
-             aria-label="Sets"
-             data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
-      <input class="plan-ex-reps" type="text"
-             placeholder="${isSeconds ? 'Sec' : 'Reps'}"
-             value="${escHtml(String(ex.reps))}"
-             aria-label="${isSeconds ? 'Seconds target' : 'Reps target'}"
-             data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
+      <label class="plan-ex-field plan-ex-field-sets">
+        <span class="plan-ex-field-label">Sets</span>
+        <input class="plan-ex-sets" type="number" min="1" max="20"
+               placeholder="Sets"
+               value="${ex.sets}"
+               aria-label="Sets"
+               data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
+      </label>
+      <label class="plan-ex-field plan-ex-field-reps">
+        <span class="plan-ex-field-label">Target</span>
+        <input class="plan-ex-reps" type="text"
+               placeholder="${isSeconds ? 'Sec' : 'Reps'}"
+               value="${escHtml(String(ex.reps))}"
+               aria-label="${isSeconds ? 'Seconds target' : 'Reps target'}"
+               data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
+      </label>
       <button class="plan-ex-unit${isSeconds ? ' plan-ex-unit-seconds' : ''}"
               type="button"
               data-unit="${unit}"
@@ -4366,7 +4461,7 @@ function wirePlanInteractions() {
 
   // Any typing in a plan field marks the tab dirty (delegated, wired once)
   if (!container._dirtyWired) {
-    container.addEventListener('input', () => { state.ui.planDirty = true; });
+    container.addEventListener('input', () => { setPlanDirty(true); });
     container._dirtyWired = true;
   }
 
@@ -4383,7 +4478,7 @@ function wirePlanInteractions() {
       wireRemoveButton(row.querySelector('.plan-ex-remove'));
       wireUnitToggle(row.querySelector('.plan-ex-unit'));
       wirePlanExerciseName(row);
-      state.ui.planDirty = true;
+      setPlanDirty(true);
       row.querySelector('.plan-ex-name').focus();
     });
   });
@@ -4405,7 +4500,7 @@ function wirePlanInteractions() {
 function wireRemoveButton(btn) {
   btn.addEventListener('click', () => {
     btn.closest('.plan-exercise-row')?.remove();
-    state.ui.planDirty = true;
+    setPlanDirty(true);
   });
 }
 
@@ -4427,7 +4522,7 @@ function setPlanRowUnit(btn, toSeconds) {
 function wireUnitToggle(btn) {
   btn.addEventListener('click', () => {
     setPlanRowUnit(btn, btn.dataset.unit !== 'seconds');
-    state.ui.planDirty = true;
+    setPlanDirty(true);
   });
 }
 
@@ -4445,7 +4540,7 @@ function wirePlanExerciseName(row) {
     provider: exerciseSuggestionProvider,
     container: row.querySelector('.plan-ex-name-wrap'),
     onSelect: (sel) => {
-      state.ui.planDirty = true;
+      setPlanDirty(true);
       if (sel.isNew) { row.dataset.loadType = ''; row.dataset.muscles = ''; return; }
       const def = sel.def;
       nameInput.value = def.name;
@@ -4481,7 +4576,7 @@ function handleDeleteDay(dayIdx) {
       const updated = { ...state.plan, days };
       await put('plan', updated);
       state.plan = updated;
-      state.ui.planDirty = false;
+      setPlanDirty(false);
       renderPlan();
       renderWeekStrip();
       showToast(`${dayName}'s program deleted.`);
@@ -4535,7 +4630,7 @@ function handleMoveDay(sourceIdx) {
       const updated = { ...state.plan, days };
       await put('plan', updated);
       state.plan = updated;
-      state.ui.planDirty = false;
+      setPlanDirty(false);
       renderPlan();
       renderWeekStrip();
       showToast(`Moved ${sourceName}'s program to ${DAY_NAMES_LONG[targetIdx]}.`);
@@ -4605,7 +4700,7 @@ async function handleSavePlan() {
   const updated = { ...state.plan, days: updatedDays };
   await put('plan', updated);
   state.plan = updated;
-  state.ui.planDirty = false;
+  setPlanDirty(false);
 
   showToast('Plan saved.');
   renderWeekStrip();
