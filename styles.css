@@ -1012,21 +1012,6 @@ body.rest-timer-active .main-content {
   padding: 6px 4px 2px;
 }
 
-/* The Plan tab is ~1900px of scroll and its only Save control sat at the very
-   top, so saving a change made on Sunday meant scrolling the whole way back up
-   to reach it. The header sticks to the top of the scroll container instead,
-   keeping Save in reach from every day card. It needs its own background —
-   a transparent sticky header lets rows slide visibly underneath it. */
-#view-plan .section-header {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  background-color: var(--color-bg);
-  padding: 10px 4px 8px;
-  margin-bottom: 2px;
-}
-
-
 .section-title {
   font-size: 16px;
   font-weight: 700;

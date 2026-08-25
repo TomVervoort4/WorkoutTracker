@@ -2502,7 +2502,13 @@ function renderToday() {
   const isFutureDate = viewDate > state.ui.today;
   const { dayPlan, activeEx, extras, allExercises } = resolveExercisesForDate(viewDate);
   const hasContent = activeEx.length > 0 || extras.length > 0;
-  const isRest   = !dayPlan || !hasContent;
+  // dayPlan is null on a rest day (no routine assigned/rescheduled here) — but
+  // "Train anyway" adds a session-scoped extra to a rest day WITHOUT a routine,
+  // so hasContent alone must decide isRest. Gating on dayPlan too (the old
+  // condition) hid that added exercise forever: it was correctly written to
+  // swaps_<date> (which is why re-adding it said "already in this session"),
+  // it just never rendered.
+  const isRest   = !hasContent;
   const finished = !!(state.meta[FINISHED_KEY]?.value?.[viewDate]);
 
   // Viewing-a-different-date banner
@@ -2551,8 +2557,11 @@ function renderToday() {
 
   // Session progress counters
   sessionOverview.hidden = false;
+  // dayPlan is null when the date has no routine (a rest day carrying only
+  // session-scoped extras from "Train anyway") — its exercises still need a
+  // session header.
   document.getElementById('session-name').textContent =
-    dayPlan.sessionName || (dayPlan.isRest ? 'Extra Session' : 'Session');
+    dayPlan?.sessionName || 'Extra Session';
 
   // Session-level note (one per training day, keyed by date in meta). Populated
   // from the viewed date so a past session shows that day's note; the input's
