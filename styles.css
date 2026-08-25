@@ -3733,3 +3733,84 @@ button.hub-card:hover { border-color: var(--color-border-muted); }
 
 /* Lock background scroll while the sheet is open */
 body.detail-open { overflow: hidden; }
+
+/* ═══════════════════════════════════════════════════════
+   ACTIVITY HEATMAP & MUSCLE FOCUS — hub cards (heatmaps.js)
+   Same accent family as the rest of the hub; no new colour tokens.
+═══════════════════════════════════════════════════════ */
+.heatmap-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
+}
+.heatmap-grid {
+  display: grid;
+  grid-template-rows: 14px repeat(7, 11px);
+  gap: 3px;
+}
+.heatmap-cell {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background-color: var(--color-surface-2);
+}
+.heatmap-cell.heatmap-empty { background: transparent; }
+.heatmap-cell.level-1 { background-color: rgba(0, 240, 255, 0.18); }
+.heatmap-cell.level-2 { background-color: rgba(0, 240, 255, 0.38); }
+.heatmap-cell.level-3 { background-color: rgba(0, 240, 255, 0.62); }
+.heatmap-cell.level-4 { background-color: var(--color-accent); }
+.heatmap-month {
+  grid-row: 1;
+  align-self: end;
+  padding-bottom: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-tertiary);
+  white-space: nowrap;
+}
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--color-tertiary);
+}
+.heatmap-legend .heatmap-cell { width: 9px; height: 9px; }
+
+.muscle-bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.muscle-bar-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 28px;
+  align-items: center;
+  gap: 8px;
+}
+.muscle-bar-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.muscle-bar-track {
+  height: 8px;
+  border-radius: 4px;
+  background-color: var(--color-surface-2);
+  overflow: hidden;
+}
+.muscle-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background-color: var(--color-accent);
+}
+.muscle-bar-count {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-secondary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

@@ -8,6 +8,7 @@
 
 import { get, put, del, getAll, getAllKeys, putMany, clear } from './db.js';
 import { setAliasMap, checkForNewPB, computeRecentPRs, computePlateaus, computeExerciseSeries, getExercisePR } from './insights.js';
+import { buildActivityHeatmapCard, buildMuscleFocusCard } from './heatmaps.js';
 import {
   loadReference,
   loadExerciseMap,
@@ -2380,6 +2381,16 @@ function buildHubPlateaus() {
     </div>`;
 }
 
+/** Activity heatmap — completed sets per day, GitHub-style. Computed in heatmaps.js. */
+function buildHubActivityHeatmap() {
+  return buildActivityHeatmapCard(state.logs, { today: state.ui.today });
+}
+
+/** Muscle focus — completed sets per primary muscle, last 30 days. Computed in heatmaps.js. */
+function buildHubMuscleFocus() {
+  return buildMuscleFocusCard(state, { today: state.ui.today });
+}
+
 /**
  * Addition 6 — a quiet "last backup" recency card. Its only computation is
  * (today − lastBackupDate) in whole days, compared against LAST_BACKUP_STALE_DAYS.
@@ -2580,6 +2591,8 @@ function renderHub() {
     buildHubBody(days) +
     buildHubTrend(days) +
     buildHubStrengthBodyweight(days) +
+    buildHubActivityHeatmap() +
+    buildHubMuscleFocus() +
     buildHubPRs() +
     buildHubPlateaus() +
     buildHubLastBackup() +
