@@ -65,6 +65,19 @@
         <button class="btn-ghost back-to-today-btn" id="back-to-today-btn">Back to Today</button>
       </div>
 
+      <!-- Reschedule bar — what this DATE trains, and the escape hatch to change
+           it without touching the weekly plan. Always present on a planned or
+           rest day; see openRescheduleSheet in app.js. -->
+      <div class="reschedule-bar" id="reschedule-bar" hidden>
+        <span class="reschedule-text" id="reschedule-text"></span>
+        <button class="btn-ghost reschedule-btn" id="reschedule-btn" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M14 15l2 2 3-3"/>
+          </svg>
+          Reschedule
+        </button>
+      </div>
+
       <!-- Session overview bar -->
       <div class="session-overview" id="session-overview" hidden>
         <div class="session-overview-inner">
@@ -237,37 +250,67 @@
 
     </section>
 
-    <!-- ── PLAN TAB ── -->
+    <!-- ── PLAN TAB — routines, and the week that points at them ── -->
     <section class="tab-view" id="view-plan" role="tabpanel" aria-label="Workout plan" hidden>
 
-      <div class="section-header">
-        <h2 class="section-title">Weekly Routine</h2>
-        <button class="btn-secondary" id="save-plan-btn" aria-label="Save plan">Save</button>
+      <div class="section-header stats-header">
+        <h2 class="section-title">Plan</h2>
+        <span class="stats-sub">Your weekly routine</span>
       </div>
-      <p class="section-sub">Assign a session name and exercises to each day. Leave empty for rest.</p>
 
-      <!-- JS renders one plan-day-card per day of the week -->
-      <div class="plan-days" id="plan-days">
-        <!-- Example day card structure JS will produce:
-        <div class="card plan-day-card" data-day="1">
-          <div class="plan-day-header">
-            <span class="plan-day-label">Monday</span>
-            <input class="plan-session-name-input" type="text" placeholder="e.g. Push Day" aria-label="Session name for Monday" />
-          </div>
-          <div class="plan-exercises-list" data-day="1">
-            <div class="plan-exercise-row" data-exercise-index="0">
-              <input class="plan-ex-name" type="text" placeholder="Exercise name" aria-label="Exercise name" />
-              <input class="plan-ex-sets" type="number" min="1" max="20" placeholder="Sets" aria-label="Sets" />
-              <input class="plan-ex-reps" type="text" placeholder="Reps" aria-label="Reps target" />
-              <button class="plan-ex-remove" aria-label="Remove exercise">
-                <svg ...x... />
-              </button>
-            </div>
-          </div>
-          <button class="btn-ghost plan-add-ex-btn" data-day="1">+ Add exercise</button>
-        </div>
-        -->
+      <h3 class="plan-section-label">Week schedule</h3>
+      <div id="plan-week"><!-- JS renders seven weekday rows here --></div>
+
+      <div class="plan-section-head">
+        <h3 class="plan-section-label">Routines</h3>
+        <button class="btn-tinted" id="new-routine-btn" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 5v14"/><path d="M5 12h14"/>
+          </svg>
+          New
+        </button>
       </div>
+      <div id="plan-routines"><!-- JS renders the routine library here --></div>
+
+    </section>
+
+    <!-- ── ROUTINE EDITOR — reached from the Plan tab, not from the nav bar ── -->
+    <section class="tab-view" id="view-routine" role="tabpanel" aria-label="Edit routine" hidden>
+
+      <div class="routine-head">
+        <button class="icon-btn" id="routine-back-btn" type="button" aria-label="Back to Plan">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+        <input class="routine-name-input" id="routine-name-input" type="text"
+               placeholder="Routine name" aria-label="Routine name" autocomplete="off" />
+        <button class="icon-btn" id="routine-glyph-btn" type="button" aria-label="Pick an icon"></button>
+      </div>
+
+      <div id="routine-progression"><!-- JS renders the progression row here --></div>
+      <p class="plan-section-note">Applies to every exercise in this routine that does not set its own rule.</p>
+
+      <div id="routine-exercises"><!-- JS renders the exercise rows here --></div>
+
+      <div id="routine-coverage"><!-- JS renders "What this session hits" here --></div>
+
+      <p class="plan-section-note plan-note-icon">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>
+          <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>
+        </svg>
+        Tap the link button on an exercise to superset it with the one above — you'll do them back-to-back.
+      </p>
+
+      <button class="btn-primary btn-block" id="routine-add-ex-btn" type="button">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 5v14"/><path d="M5 12h14"/>
+        </svg>
+        Add exercise
+      </button>
+
+      <button class="btn-danger btn-block" id="routine-delete-btn" type="button">Delete routine</button>
 
     </section>
 
@@ -456,6 +499,20 @@
       <div class="dialog-actions">
         <button class="btn-secondary" id="settings-close-btn">Close</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       BOTTOM SHEET — one reusable surface for every picker the Plan tab and
+       the day view open (assign a day, reschedule a date, pick an exercise,
+       configure one, choose a progression rule, choose a routine icon).
+       Content is built by JS; only the shell lives here.
+  ═══════════════════════════════════════════ -->
+  <div class="sheet-overlay" id="sheet-overlay" hidden aria-modal="true" role="dialog" aria-labelledby="sheet-title">
+    <div class="sheet-box" id="sheet-box">
+      <div class="sheet-grabber" aria-hidden="true"></div>
+      <h2 class="sheet-title" id="sheet-title"></h2>
+      <div class="sheet-body" id="sheet-body"></div>
     </div>
   </div>
 

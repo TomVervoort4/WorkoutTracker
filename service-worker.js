@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v37";
+const CACHE_VERSION = "v38";
 const CACHE_NAME = `fittrack-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -9,6 +9,8 @@ const APP_SHELL = [
   "./insights.js",
   "./heatmaps.js",
   "./muscles.js",
+  "./plan.js",
+  "./progression.js",
   "./bodycomp.js",
   "./reference.js",
   // Vendored SheetJS — precached so Fitdays imports work with no network

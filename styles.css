@@ -1026,17 +1026,6 @@ body.rest-timer-active .main-content {
   margin-bottom: 2px;
 }
 
-/* Unsaved edits are stated on the control that resolves them, rather than only
-   surfacing as a confirm dialog once you try to leave the tab. */
-#save-plan-btn.plan-unsaved {
-  color: var(--color-bg);
-  background-color: var(--color-accent);
-  border-color: var(--color-accent);
-}
-#save-plan-btn.plan-unsaved::after {
-  content: ' •';
-  font-weight: 800;
-}
 
 .section-title {
   font-size: 16px;
@@ -4077,3 +4066,570 @@ button.stat-tile:active { transform: scale(0.99); }
 }
 .recent-session-meta { font-size: 12px; color: var(--color-tertiary); }
 .recent-session-date { flex: none; font-size: 12px; color: var(--color-secondary); }
+
+/* ═══════════════════════════════════════════════════════
+   PLAN TAB — routines, the week schedule, the routine editor
+   (plan.js builds the markup; app.js wires it)
+═══════════════════════════════════════════════════════ */
+.plan-section-label {
+  padding: 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-secondary);
+}
+
+.plan-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding-right: 2px;
+}
+
+.plan-section-note {
+  margin: -4px 4px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-tertiary);
+}
+.plan-note-icon {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.plan-note-icon svg { flex: none; margin-top: 2px; }
+
+/* A stack of rows that reads as one grouped list. */
+.plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 56px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+.plan-row:active { transform: scale(0.99); }
+.plan-row:hover  { border-color: var(--color-border-muted); }
+.plan-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+.plan-row-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.plan-row-title { flex: 1; font-size: 15px; font-weight: 600; }
+.plan-row-main .plan-row-title { flex: none; }
+.plan-row-sub { font-size: 12px; color: var(--color-tertiary); }
+.plan-row-value {
+  flex: none;
+  max-width: 55%;
+  font-size: 14px;
+  color: var(--color-secondary);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row-chevron { flex: none; color: var(--color-tertiary); }
+
+/* The routine badge on a week row. Accent-tinted so an assigned day reads at a
+   glance against the plain grey "Rest". */
+.routine-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  max-width: 55%;
+  padding: 4px 9px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 600;
+  background-color: var(--color-accent-dim);
+  color: var(--color-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.routine-tag svg { flex: none; }
+.routine-tag-rest {
+  background-color: var(--color-surface-2);
+  color: var(--color-secondary);
+  font-weight: 500;
+}
+.routine-tag-changed { background-color: var(--color-warm-dim); color: var(--color-warm); }
+
+/* The square glyph tile beside a routine. */
+.routine-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background-color: var(--color-accent-dim);
+  color: var(--color-accent);
+}
+.routine-icon-sm { width: 26px; height: 26px; border-radius: var(--radius-sm); }
+
+.plan-empty {
+  padding: 22px 16px;
+  border: 1px dashed var(--color-border-muted);
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+.plan-empty-title { font-size: 14px; font-weight: 600; }
+.plan-empty-sub { margin-top: 4px; font-size: 13px; color: var(--color-tertiary); }
+
+/* ── Routine editor ─────────────────────────────────── */
+.routine-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0 4px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--color-border);
+  border-radius: 99px;
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+.icon-btn:active { transform: scale(0.95); }
+.icon-btn:hover { border-color: var(--color-border-muted); }
+
+.routine-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.021em;
+}
+.routine-name-input:focus { outline: none; border-color: var(--color-accent); }
+
+.routine-ex-list { display: flex; flex-direction: column; gap: 8px; }
+
+.routine-ex-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface);
+}
+
+.routine-ex-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.routine-ex-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background-color: #fff;
+  color: var(--color-secondary);
+}
+/* The reference frames are line art on white, so the tile stays white in dark
+   mode rather than inverting the artwork. The placeholder icon needs a darker
+   ink against it. */
+.routine-ex-thumb:has(> svg) { background-color: var(--color-surface-2); }
+.ex-thumb-img { width: 100%; height: 100%; object-fit: cover; }
+
+.routine-ex-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.routine-ex-name {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.routine-ex-line { font-size: 12px; color: var(--color-tertiary); }
+
+.routine-ex-controls { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: none; }
+.routine-ex-moves { display: flex; gap: 3px; }
+
+.routine-ex-move,
+.routine-ex-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-muted);
+  background-color: var(--color-surface-2);
+  color: var(--color-secondary);
+  cursor: pointer;
+  position: relative;
+}
+.routine-ex-move { width: 30px; height: 26px; border-radius: var(--radius-sm); }
+.routine-ex-link { width: 34px; height: 26px; border-radius: var(--radius-sm); }
+.routine-ex-link.is-on {
+  background-color: var(--color-accent-dim);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+/* Kept visually small to line up with the row, so the 44px target is added
+   invisibly rather than by growing the box (see the design-system note). */
+.routine-ex-move::after,
+.routine-ex-link::after {
+  content: '';
+  position: absolute;
+  inset: -9px -5px;
+}
+
+/* A superset pair is one object: a shared label and a tinted rail down the side. */
+.superset-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--color-accent);
+}
+.routine-ex-row.in-superset {
+  border-left: 3px solid var(--color-accent);
+  border-top-left-radius: var(--radius-sm);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.routine-coverage { margin-top: 4px; }
+.routine-coverage .body-map-placeholder { height: 200px; }
+
+.btn-block {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+}
+
+.btn-tinted {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background-color: var(--color-accent-dim);
+  color: var(--color-accent);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-tinted:active { transform: scale(0.97); }
+
+/* ═══════════════════════════════════════════════════════
+   BOTTOM SHEET — the shared surface for every plan picker
+═══════════════════════════════════════════════════════ */
+.sheet-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.55);
+  animation: fade-in var(--transition-fast) ease;
+}
+.sheet-overlay.overlay-closing { animation: fade-out var(--transition-fast) ease forwards; }
+
+.sheet-box {
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 16px calc(20px + var(--safe-bottom));
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+  background-color: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  animation: sheet-up var(--transition-normal) var(--transition-slow);
+}
+
+@keyframes sheet-up {
+  from { transform: translateY(14px); opacity: 0.6; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.sheet-grabber {
+  width: 38px;
+  height: 4px;
+  margin: 4px auto 12px;
+  border-radius: 99px;
+  background-color: var(--color-border-muted);
+}
+
+.sheet-title {
+  margin-bottom: 12px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.021em;
+}
+
+.sheet-body { display: flex; flex-direction: column; gap: 8px; }
+
+.sheet-list { display: flex; flex-direction: column; gap: 8px; }
+
+.sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface-2);
+  color: var(--color-text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sheet-row:active { transform: scale(0.99); }
+.sheet-row:hover { border-color: var(--color-border-muted); }
+.sheet-row-danger { color: var(--color-danger); }
+
+.sheet-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.sheet-row-title { font-size: 15px; font-weight: 600; }
+.sheet-row-sub { font-size: 12px; line-height: 1.4; color: var(--color-tertiary); }
+.sheet-row-check { flex: none; font-size: 16px; font-weight: 700; color: var(--color-accent); }
+
+.sheet-group-label {
+  margin-top: 6px;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-secondary);
+}
+
+.sheet-note {
+  margin-bottom: 2px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-secondary);
+}
+.sheet-note-changed { color: var(--color-warm); }
+
+.sheet-search { margin: 0; }
+
+body.sheet-open { overflow: hidden; }
+
+/* ── Routine icon grid ──────────────────────────────── */
+.glyph-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 8px;
+}
+.glyph-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-2);
+  color: var(--color-secondary);
+  cursor: pointer;
+}
+.glyph-option.is-on {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent-dim);
+  color: var(--color-accent);
+}
+
+/* ── Exercise config sheet ──────────────────────────── */
+.config-chips { margin-top: 2px; }
+
+.config-mode { margin-top: 4px; }
+
+.stepper-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.stepper-row-single { grid-template-columns: 1fr; }
+.stepper-row:has(> :nth-child(2):last-child) { grid-template-columns: repeat(2, 1fr); }
+
+.stepper-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.stepper-label { font-size: 12px; color: var(--color-secondary); text-align: center; }
+
+.stepper {
+  display: flex;
+  align-items: center;
+  height: 44px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-2);
+  overflow: hidden;
+}
+.stepper-btn {
+  flex: none;
+  width: 34px;
+  height: 100%;
+  border: none;
+  background: none;
+  color: var(--color-secondary);
+  font-family: inherit;
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+.stepper-btn:active { background-color: var(--color-border); }
+.stepper-value {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: none;
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.stepper-value::-webkit-outer-spin-button,
+.stepper-value::-webkit-inner-spin-button { appearance: none; margin: 0; }
+.stepper-value:focus { outline: none; }
+
+.config-toggles {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface-2);
+  overflow: hidden;
+}
+.config-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+.config-toggle-row + .config-toggle-row { border-top: 1px solid var(--color-border); }
+.config-toggle-text { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.config-toggle-title { font-size: 14px; font-weight: 600; }
+.config-toggle-sub { font-size: 12px; color: var(--color-tertiary); }
+
+/* ═══════════════════════════════════════════════════════
+   DAY VIEW — reschedule bar, superset groups, progression hint
+═══════════════════════════════════════════════════════ */
+.reschedule-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface);
+}
+.reschedule-text { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reschedule-sub { color: var(--color-tertiary); }
+.reschedule-changed { color: var(--color-warm); font-weight: 600; }
+.reschedule-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  font-size: 13px;
+}
+
+.ss-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 8px 10px;
+  border: 1px solid var(--color-accent-dim);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius-lg);
+  background-color: rgba(0, 240, 255, 0.03);
+}
+.ss-group .superset-label { padding-bottom: 0; }
+
+/* What the progression rule calls for, and why. Neutral by default; the two
+   states that CHANGE the load say so with the palette's existing tokens. */
+.rx-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-2);
+}
+.rx-target { font-size: 14px; font-weight: 700; }
+.rx-why { font-size: 12px; line-height: 1.4; color: var(--color-tertiary); }
+.rx-up     { border-left-color: var(--color-success); }
+.rx-up     .rx-target { color: var(--color-success); }
+.rx-deload { border-left-color: var(--color-warning); }
+.rx-deload .rx-target { color: var(--color-warning); }
+
+/* The hard-set filter on the Muscle balance map. Offered only when the window
+   actually holds RPE ratings — with none, the filtered map would be empty and
+   read as "you trained nothing". */
+.mm-flame {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 4px 9px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: 99px;
+  background-color: var(--color-surface-2);
+  color: var(--color-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mm-flame.is-on {
+  border-color: var(--color-warning);
+  background-color: rgba(210, 153, 34, 0.14);
+  color: var(--color-warning);
+}

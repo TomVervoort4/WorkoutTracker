@@ -91,6 +91,15 @@ const STRENGTH_THRESHOLDS = [
 const READY_BELOW      = 0.25;
 const RECOVERING_BELOW = 0.50;
 
+/**
+ * An RPE at or above this counts the set as taken near failure. The app logs
+ * RPE per set (optional, blank on most), so "where did the HARD sets go" is a
+ * different question from "where did the sets go": a muscle can lead on volume
+ * and still never be trained close to failure. 8 is the conventional floor for
+ * a working set with about two reps left.
+ */
+const HARD_RPE = 8;
+
 /** How many muscles get a bar under the balance map before the list stops. */
 const BALANCE_TOP_N = 4;
 
@@ -285,6 +294,17 @@ async function loadBodyPaths() {
   return BODY_PENDING;
 }
 
+/**
+ * A read-only front/back map of one already-computed load — the routine editor's
+ * "what this session hits" card. Same geometry, same shade scale as the Stats
+ * tab, so a planned session and a trained week are read the same way.
+ */
+function buildLoadBodyMap(load) {
+  return buildBodyMap(levelsOf(load), {
+    labelOf: (m) => `${MUSCLE_NAME[m] ?? m}: ${fmtSets(load[m] ?? 0)} sets`,
+  });
+}
+
 /** Whether the geometry is already in memory (so a render can draw it now). */
 const bodyPathsReady = () => BODY_PATHS != null;
 
@@ -320,10 +340,14 @@ function buildMuscleCatalog(plan, meta, resolveMuscles) {
     });
   };
 
-  if (plan) {
-    for (const day of plan.days ?? []) {
-      for (const ex of (day.exercises ?? [])) add(ex);
-    }
+  // Routines first (the plan's own exercises), then session-scoped swaps, then
+  // the orphan registry. `plan.days` is the pre-v2 shape and is still read so a
+  // backup restored from before routines existed still builds a full catalog.
+  for (const routine of (plan?.routines ?? [])) {
+    for (const ex of (routine.exercises ?? [])) add(ex);
+  }
+  for (const day of (plan?.days ?? [])) {
+    for (const ex of (day.exercises ?? [])) add(ex);
   }
   for (const key in meta) {
     if (!key.startsWith('swaps_')) continue;
@@ -347,12 +371,13 @@ const isCompletedSet = (l) => !!l.done && l.reps != null;
  * got none. `withinDays: 0` means all time. Counts and a set difference — both
  * facts, neither a judgement.
  */
-function computeMuscleBalance(state, { today, withinDays = 30, catalog } = {}) {
+function computeMuscleBalance(state, { today, withinDays = 30, catalog, hardOnly = false } = {}) {
   const cat = catalog ?? buildMuscleCatalog(state.plan, state.meta);
   const cutoff = withinDays > 0 ? addDays(today, -withinDays + 1) : null;
 
   const items = [];
-  let sessionDates = new Set();
+  const sessionDates = new Set();
+  let ratedSets = 0;
   for (const l of state.logs) {
     if (!isCompletedSet(l)) continue;
     if (l.date > today) continue;
@@ -360,6 +385,8 @@ function computeMuscleBalance(state, { today, withinDays = 30, catalog } = {}) {
     const ex = cat.get(canonId(l.exerciseId));
     if (!ex) continue;
     sessionDates.add(l.date);
+    if (l.rpe != null) ratedSets++;
+    if (hardOnly && !(l.rpe >= HARD_RPE)) continue;
     items.push({ weights: ex.weights, sets: 1 });
   }
 
@@ -372,6 +399,10 @@ function computeMuscleBalance(state, { today, withinDays = 30, catalog } = {}) {
     missed,
     maxLoad: worked.length ? load[worked[0]] : 0,
     sessionDays: sessionDates.size,
+    // Whether the window holds any RPE at all. With none, a hard-set map would
+    // simply be empty and read as "you trained nothing", so the toggle that
+    // produces it is not offered.
+    ratedSets,
     windowDays: withinDays,
   };
 }
@@ -607,11 +638,30 @@ function buildMuscleRow(label, { barPct = null, value = '', bold = false, barSty
 
 function buildBalancePanel(state, { today, ui, catalog }) {
   const win = MAP_WINDOWS.find(w => w.days === ui.win) ?? MAP_WINDOWS[1];
-  const b = computeMuscleBalance(state, { today, withinDays: win.days, catalog });
+  // Computed twice on purpose: the first pass reports whether the window holds
+  // any RPE at all, which is what decides if the hard-set toggle is even shown.
+  const all = computeMuscleBalance(state, { today, withinDays: win.days, catalog });
+  const hardAvailable = all.ratedSets > 0;
+  const hardOn = !!ui.hard && hardAvailable;
+  const b = hardOn
+    ? computeMuscleBalance(state, { today, withinDays: win.days, catalog, hardOnly: true })
+    : all;
+
+  const flame = hardAvailable ? `
+    <button class="mm-flame${hardOn ? ' is-on' : ''}" type="button"
+            data-map-control="hard" data-map-value="${hardOn ? '' : '1'}"
+            aria-pressed="${hardOn}">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 2c1 4 4 5 4 9a4 4 0 0 1-8 0c0-1.5.6-2.4 1.2-3.2C10 6.7 12 5 12 2z"/>
+        <path d="M8.2 12A6 6 0 0 0 12 22a6 6 0 0 0 3.8-10"/></svg>
+      ${hardOn ? 'Hard' : 'All'}
+    </button>` : '';
 
   const head = `
     <div class="mm-head">
-      <h3 class="mm-title">Muscle balance <span class="mm-sub">· by sets worked</span></h3>
+      <h3 class="mm-title">Muscle balance <span class="mm-sub">· by ${hardOn ? `hard sets (RPE ${HARD_RPE}+)` : 'sets worked'}</span></h3>
+      ${flame}
     </div>`;
 
   const windows = buildSegmented('win', MAP_WINDOWS.map(w => ({ value: w.days, label: w.label })), win.days);
@@ -619,11 +669,14 @@ function buildBalancePanel(state, { today, ui, catalog }) {
   if (!b.sessionDays) {
     return head + windows + `<p class="mm-empty">No completed sets in this period yet.</p>`;
   }
+  if (hardOn && !b.worked.length) {
+    return head + windows + `<p class="mm-empty">No sets rated RPE ${HARD_RPE} or harder in this period.</p>`;
+  }
 
   const sel = ui.selected;
   const selRow = sel
     ? `<div class="mm-row-selected">${buildMuscleRow(MUSCLE_NAME[sel] ?? sel, {
-        value: b.load[sel] ? `${fmtSets(b.load[sel])} sets` : 'not trained',
+        value: b.load[sel] ? `${fmtSets(b.load[sel])} sets` : (hardOn ? 'no hard sets' : 'not trained'),
         bold: true,
       })}</div>`
     : '';
@@ -634,10 +687,10 @@ function buildBalancePanel(state, { today, ui, catalog }) {
   )).join('');
 
   const missed = b.missed.length
-    ? `<h4 class="mm-section">Not trained in this period</h4>
+    ? `<h4 class="mm-section">${hardOn ? 'No hard sets in this period' : 'Not trained in this period'}</h4>
        <div class="mm-chips">${b.missed.map(m =>
           `<span class="mm-chip is-missed">${escHtml(MUSCLE_NAME[m] ?? m)}</span>`).join('')}</div>`
-    : `<p class="mm-note">Every muscle group got some work in this period.</p>`;
+    : `<p class="mm-note">${hardOn ? 'Every muscle group got at least one hard set in this period.' : 'Every muscle group got some work in this period.'}</p>`;
 
   return head + windows +
     buildBodyMap(b.levels, {
@@ -726,6 +779,7 @@ function buildMuscleMapCard(state, { today, ui = {}, resolveMuscles = null } = {
   const view = {
     tab: MAP_TABS.some(t => t.id === ui.tab) ? ui.tab : 'balance',
     win: MAP_WINDOWS.some(w => w.days === ui.win) ? ui.win : 30,
+    hard: !!ui.hard,
     selected: ui.selected ?? null,
   };
 
@@ -754,6 +808,8 @@ export {
   retentionFromDays,
   fatigueStatus,
   buildMuscleMapCard,
+  buildLoadBodyMap,
+  HARD_RPE,
   MAP_TABS,
   MAP_WINDOWS,
 };

@@ -158,10 +158,14 @@ function buildExerciseCatalog(plan, meta) {
     });
   };
 
-  if (plan) {
-    for (const day of plan.days) {
-      for (const ex of (day.exercises ?? [])) add(ex);
-    }
+  // Routines first (the plan's own exercises), then session-scoped swaps, then
+  // the orphan registry. `plan.days` is the pre-v2 shape and is still read so a
+  // backup restored from before routines existed still builds a full catalog.
+  for (const routine of (plan?.routines ?? [])) {
+    for (const ex of (routine.exercises ?? [])) add(ex);
+  }
+  for (const day of (plan?.days ?? [])) {
+    for (const ex of (day.exercises ?? [])) add(ex);
   }
   for (const key in meta) {
     if (!key.startsWith('swaps_')) continue;

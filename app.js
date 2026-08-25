@@ -8,7 +8,19 @@
 
 import { get, put, del, getAll, getAllKeys, putMany, clear } from './db.js';
 import { setAliasMap, checkForNewPB, computeRecentPRs, computePlateaus, computeExerciseSeries, getExercisePR } from './insights.js';
-import { buildActivityHeatmapCard, buildMuscleMapCard, loadBodyPaths, bodyPathsReady } from './heatmaps.js';
+import { buildActivityHeatmapCard, buildMuscleMapCard, buildLoadBodyMap, loadBodyPaths, bodyPathsReady } from './heatmaps.js';
+import {
+  PLAN_VERSION, DAY_NAMES as PLAN_DAY_NAMES, REST as DAY_REST, dayPlanKey,
+  GLYPHS, DEFAULT_GLYPH, glyphOf, glyphSvg, guessGlyph,
+  routinesOf, routineById, activeExercises, allPlanExercises, routineForDayIndex, resolveDay,
+  supersetUnits, cleanupSupersets, migrateToRoutines,
+  buildWeekScheduleHTML, buildRoutineListHTML, exerciseLine, buildRoutineExerciseRowHTML,
+  buildRoutineCoverageHTML, routineLoad, buildProgressionRowHTML, routineTag, exCountLabel,
+} from './plan.js';
+import {
+  POLICIES_FOR, POLICY_NAME, POLICY_DESC, DEFAULT_SEC_INCREMENT,
+  loggingModeOf, policyFor, incrementFor, nextPrescription, prescriptionLabel,
+} from './progression.js';
 import {
   loadReference,
   loadExerciseMap,
@@ -277,11 +289,13 @@ const state = {
     todayDayIndex: 0,             // 0=Mon … 6=Sun
     viewedDate: '',               // 'YYYY-MM-DD' — date shown in the Today/day-view tab
     expandedExerciseId: null,     // exercise ID whose accordion is open, or null
-    planDirty: false,             // Plan tab has edits not yet saved to the DB
     // Stats tab · muscle-map card. Which of the three readings is showing,
     // which window the balance reading counts over, and which muscle (if any)
     // is tapped. View state only — nothing here is persisted.
-    muscleMap: { tab: 'balance', win: 30, selected: null },
+    muscleMap: { tab: 'balance', win: 30, hard: false, selected: null },
+    // Plan tab · which routine the editor is showing, and where 'back' returns
+    // to. View state only — the routine itself lives in the plan document.
+    editingRoutineId: null,
     _dialogConfirmCallback: null, // pending confirm action
     _dialogExtraCallback: null,   // pending non-closing extra action (e.g. Back up first)
   },
@@ -628,12 +642,10 @@ async function migrateExerciseUnits() {
     SECONDS_BY_DEFAULT.test((ex.name ?? '').trim()) ? 'seconds' : 'reps';
 
   let planDirty = false;
-  for (const day of state.plan?.days ?? []) {
-    for (const ex of day.exercises ?? []) {
-      if (ex.unit) continue;
-      ex.unit = unitFor(ex);
-      planDirty = true;
-    }
+  for (const ex of allPlanExercises(state.plan)) {
+    if (ex.unit) continue;
+    ex.unit = unitFor(ex);
+    planDirty = true;
   }
   if (planDirty) await put('plan', state.plan);
 
@@ -663,9 +675,8 @@ async function migrateExerciseUnits() {
 async function migrateInclineDbLabel() {
   const STALE_ID = 'ex_seed_incline_db';
   let dirty = false;
-  for (const day of state.plan?.days ?? []) {
-    const ex = (day.exercises ?? []).find(e => e.id === STALE_ID);
-    if (!ex) continue;
+  for (const ex of allPlanExercises(state.plan)) {
+    if (ex.id !== STALE_ID) continue;
     if (/incline/i.test(ex.name ?? '') || /incline/i.test(ex.cue ?? '')) {
       ex.name    = 'Biceps Curl';
       ex.muscles = 'Biceps · Brachialis';
@@ -761,9 +772,7 @@ async function migrateExerciseLoadTypes() {
   };
 
   let planDirty = false;
-  for (const day of state.plan?.days ?? []) {
-    for (const ex of day.exercises ?? []) if (applyTo(ex)) planDirty = true;
-  }
+  for (const ex of allPlanExercises(state.plan)) if (applyTo(ex)) planDirty = true;
   if (planDirty) await put('plan', state.plan);
 
   for (const key in state.meta) {
@@ -1053,6 +1062,7 @@ function render() {
     case 'stats':    renderStats();        break;
     case 'body':     renderBodyTab(state.bodyComposition); break;
     case 'plan':     renderPlan();         break;
+    case 'routine':  renderRoutine();      break;
     case 'library':  renderLibrary();      break;
     case 'data':     renderData();         break;
   }
@@ -1062,17 +1072,16 @@ function render() {
 //  NAVIGATION
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Views that are not themselves a bottom-nav tab, mapped to the tab that should
+ * stay lit while they are open. The routine editor is a page you reach FROM the
+ * Plan tab, so dimming the whole nav bar while editing would read as "you have
+ * left the app" rather than "you are one level down".
+ */
+const NAV_ALIAS = { routine: 'plan' };
+
 function switchView(viewName) {
   if (state.ui.currentView === viewName) return;
-
-  // Plan edits only persist on explicit Save — confirm before discarding them
-  if (state.ui.currentView === 'plan' && state.ui.planDirty) {
-    showDialog('You have unsaved plan changes. Discard them?', () => {
-      setPlanDirty(false);
-      switchView(viewName);
-    });
-    return;
-  }
 
   state.ui.currentView = viewName;
   state.ui.expandedExerciseId = null; // collapse open accordions on tab change
@@ -1083,8 +1092,9 @@ function switchView(viewName) {
     el.hidden = !isTarget;
   });
 
+  const navFor = NAV_ALIAS[viewName] ?? viewName;
   document.querySelectorAll('.nav-tab').forEach(btn => {
-    const isActive = btn.dataset.view === viewName;
+    const isActive = btn.dataset.view === navFor;
     btn.classList.toggle('active-tab', isActive);
     btn.setAttribute('aria-selected', String(isActive));
   });
@@ -1362,6 +1372,17 @@ function wireStaticListeners() {
     if (e.key === 'Escape' && !detailOverlay.hidden) closeExerciseDetail();
   });
 
+  // 8d. Bottom sheet — backdrop tap and Esc. Every picker the Plan tab and the
+  //     day view open shares this one surface, so this is all the wiring it needs;
+  //     each sheet binds only its own rows when it opens.
+  const sheetOverlay = document.getElementById('sheet-overlay');
+  sheetOverlay.addEventListener('click', (e) => {
+    if (e.target === sheetOverlay) closeSheet();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !sheetOverlay.hidden) closeSheet();
+  });
+
   // 9. Confirm dialog buttons
   document.getElementById('dialog-cancel-btn').addEventListener('click', closeDialog);
   document.getElementById('dialog-confirm-btn').addEventListener('click', () => {
@@ -1426,6 +1447,7 @@ async function init() {
   //    (the settings gear included) down with it.
   await runSetupStep('First-run setup', seedIfFirstRun);
   await runSetupStep('Cleaning up old settings', dropRetiredMeta);
+  await runSetupStep('Routine migration', migratePlanToRoutines);
   await runSetupStep('Exercise-unit migration', migrateExerciseUnits);
   await runSetupStep('Incline-DB label fix', migrateInclineDbLabel);
   await runSetupStep('Load-type migration', migrateExerciseLoadTypes);
@@ -1878,14 +1900,26 @@ function isExerciseComplete(exerciseId, date, totalSets) {
  * the recurring weekly plan document.
  */
 function resolveExercisesForDate(date) {
-  const dayIdx      = dayIndexOf(date);
-  const dayPlan     = state.plan?.days[dayIdx] ?? null;
+  const day         = dayForDate(date);
+  const routine     = day.routine;
   const removedIds  = state.meta[`removed_${date}`]?.value ?? [];
-  const activeEx    = (dayPlan?.exercises ?? [])
+  const activeEx    = (routine?.exercises ?? [])
     .filter(e => !e.archived && !removedIds.includes(e.id));
   const swapsKey    = `swaps_${date}`;
   const extras      = state.meta[swapsKey]?.value ?? [];
-  return { dayPlan, activeEx, extras, allExercises: [...activeEx, ...extras] };
+  // `dayPlan` keeps the shape the rest of the app already reads: a truthy object
+  // means "this date has a session", and `sessionName` is what the session
+  // header and the volume chart label it with.
+  const dayPlan = routine
+    ? {
+        dayIndex: dayIndexOf(date), sessionName: routine.name, isRest: false,
+        routineId: routine.id, exercises: routine.exercises ?? [],
+      }
+    : null;
+  return {
+    dayPlan, routine, rescheduled: day.overridden,
+    activeEx, extras, allExercises: [...activeEx, ...extras],
+  };
 }
 
 /** Adds an exerciseId to a date's session-scoped removal list (idempotent). */
@@ -1920,11 +1954,8 @@ async function unremoveId(date, exerciseId) {
  * session-scoped swap/add extras. Returns null when unknown.
  */
 function getExerciseDef(exerciseId) {
-  if (state.plan) {
-    for (const day of state.plan.days) {
-      const ex = day.exercises?.find(e => e.id === exerciseId);
-      if (ex) return ex;
-    }
+  for (const ex of allPlanExercises(state.plan)) {
+    if (ex.id === exerciseId) return ex;
   }
   for (const key in state.meta) {
     if (!key.startsWith('swaps_')) continue;
@@ -2012,9 +2043,12 @@ function sessionsThisWeek() {
  * Zero populated days ⇒ target 0 ⇒ nothing is ever flagged short.
  */
 function weeklyTrainingTarget() {
-  return (state.plan?.days ?? [])
-    .filter(day => (day.exercises ?? []).some(e => !e.archived))
-    .length;
+  let n = 0;
+  for (let i = 0; i < 7; i++) {
+    const routine = routineForDayIndex(state.plan, i);
+    if (routine && activeExercises(routine).length) n++;
+  }
+  return n;
 }
 
 /** Distinct session dates within the Mon–Sun week beginning at `mondayDate`. */
@@ -2495,8 +2529,11 @@ function renderToday() {
     exerciseStack.innerHTML = '';
     finishRow.hidden        = true;
     addExerciseRow.hidden   = true;
+    document.getElementById('reschedule-bar').hidden = true;
     return;
   }
+
+  renderRescheduleBar(viewDate);
 
   if (isRest) {
     sessionOverview.hidden  = true;
@@ -2535,10 +2572,24 @@ function renderToday() {
   document.getElementById('session-progress-bar').style.width =
     totalCount > 0 ? `${Math.round((completedCount / totalCount) * 100)}%` : '0%';
 
-  // Rebuild exercise cards — read-only for future dates, nothing to log yet
-  exerciseStack.innerHTML = allExercises
+  // Rebuild exercise cards — read-only for future dates, nothing to log yet.
+  // Exercises the routine pairs into a superset are wrapped together under one
+  // label, so "do these back-to-back" is visible while training rather than
+  // only while planning. One-off session extras never join a pair.
+  const units = supersetUnits(activeEx);
+  let stackHTML = '';
+  for (const unit of units) {
+    const cards = unit
+      .map(i => buildExerciseCardHTML(activeEx[i], viewDate, { readOnly: isFutureDate }))
+      .join('');
+    stackHTML += unit.length > 1
+      ? `<div class="ss-group">${SUPERSET_LABEL_HTML}${cards}</div>`
+      : cards;
+  }
+  stackHTML += extras
     .map(ex => buildExerciseCardHTML(ex, viewDate, { readOnly: isFutureDate }))
     .join('');
+  exerciseStack.innerHTML = stackHTML;
   wireExerciseCards(allExercises, viewDate);
 
   // Show finish button if any sets are done and session isn't already finished
@@ -2682,6 +2733,18 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
     l => l.exerciseId === ex.id && l.date === date && l.setIndex === 0
   )?.notes ?? '';
 
+  // What the routine's progression rule calls for this session, and the reason
+  // in plain words. Read-only: it fills an empty input when a set is checked
+  // (see handleSetCheck) and never overwrites anything already typed or logged.
+  const rx = readOnly ? null : prescriptionForExercise(ex, date);
+  const rxLabel = rx ? prescriptionLabel(rx, ex) : '';
+  const prescriptionBlock = (rx && rx.kind !== 'off' && rxLabel)
+    ? `<div class="rx-hint rx-${rx.kind}">
+         <span class="rx-target">${escHtml(rxLabel)}</span>
+         <span class="rx-why">${escHtml(rx.why ?? '')}</span>
+       </div>`
+    : '';
+
   const metaBlock = (ex.muscles || ex.cue)
     ? `<div class="exercise-meta-block">
         ${ex.muscles ? `<span class="exercise-muscles">${escHtml(ex.muscles)}</span>` : ''}
@@ -2734,6 +2797,7 @@ function buildExerciseCardHTML(ex, date, { readOnly = false } = {}) {
       </button>
       <div class="exercise-body${expanded ? ' expanded' : ''}">
         ${metaBlock}
+        ${prescriptionBlock}
         ${detailBtn}
         <div class="sets-table">
           <div class="sets-table-header${headVariant}">
@@ -3006,8 +3070,14 @@ async function handleSetCheck(exerciseId, setIndex, date) {
       .filter(l => l.exerciseId === exerciseId && l.date === date && l.done && l.setIndex !== setIndex)
       .sort((a, b) => a.setIndex - b.setIndex);
     const sameDay = sameDaySets[sameDaySets.length - 1] ?? null;
-    if (wVal == null && loadIsMeaningful) wVal = sameDay?.weight ?? prev?.weight ?? null;
-    if (rVal == null) rVal = sameDay?.reps ?? prev?.reps ?? (parseInt(exDef?.reps, 10) || null);
+    // The progression rule sits BETWEEN today's own sets and last session: a
+    // set already done today still wins (it is what is actually on the bar),
+    // but otherwise the rule's number beats simply repeating last week.
+    const rx = exDef ? prescriptionForExercise(exDef, date) : null;
+    const rxWeight = (rx && rx.kind !== 'off' && rx.kind !== 'first') ? rx.weight : null;
+    const rxReps   = (rx && rx.kind !== 'off' && rx.kind !== 'first') ? rx.reps   : null;
+    if (wVal == null && loadIsMeaningful) wVal = sameDay?.weight ?? rxWeight ?? prev?.weight ?? null;
+    if (rVal == null) rVal = sameDay?.reps ?? rxReps ?? prev?.reps ?? (parseInt(exDef?.reps, 10) || null);
   }
 
   await writeLog(date, exerciseId, setIndex, { weight: wVal, reps: rVal, done: newDone });
@@ -3114,9 +3184,7 @@ function buildKnownExerciseList() {
     if (!key || key === UNNAMED_EXERCISE_PLACEHOLDER.toLowerCase()) return;
     if (!seen.has(key)) seen.set(key, ex);
   };
-  for (const day of state.plan?.days ?? []) {
-    for (const ex of day.exercises ?? []) consider(ex);
-  }
+  for (const ex of allPlanExercises(state.plan)) consider(ex);
   for (const key in state.meta) {
     if (!key.startsWith('swaps_')) continue;
     for (const ex of state.meta[key]?.value ?? []) consider(ex);
@@ -3548,8 +3616,9 @@ function renderMuscleMap() {
   host.querySelectorAll('[data-map-control]').forEach(btn => {
     btn.addEventListener('click', () => {
       const { mapControl, mapValue } = btn.dataset;
-      if (mapControl === 'tab') state.ui.muscleMap.tab = mapValue;
+      if (mapControl === 'tab') { state.ui.muscleMap.tab = mapValue; state.ui.muscleMap.hard = false; }
       if (mapControl === 'win') state.ui.muscleMap.win = Number(mapValue);
+      if (mapControl === 'hard') state.ui.muscleMap.hard = mapValue === '1';
       state.ui.muscleMap.selected = null; // a new view starts with nothing picked
       renderMuscleMap();
     });
@@ -3619,7 +3688,9 @@ const sessionTypeColors = () => [...CHART_COLORS().series, CHART_COLORS().other]
 
 /** The plan's session name for the weekday a date falls on, or 'Other'. */
 function sessionTypeForDate(dateStr) {
-  const name = state.plan?.days?.[dayIndexOf(dateStr)]?.sessionName?.trim();
+  // Reads the date's EFFECTIVE routine, so a rescheduled session is labelled
+  // with what was actually trained rather than with what the week planned.
+  const name = dayForDate(dateStr).routine?.name?.trim();
   return name || 'Other';
 }
 
@@ -3662,7 +3733,7 @@ function buildWeeklyVolumeData() {
 /** Ordered session types present in the data — plan-day order first, extras last. */
 function orderedSessionTypes(weeks) {
   const planTypes = [...new Set(
-    (state.plan?.days ?? []).map(d => d.sessionName?.trim()).filter(Boolean)
+    routinesOf(state.plan).map(r => r.name?.trim()).filter(Boolean)
   )];
   const dataTypes = [...new Set(weeks.flatMap(w => Object.keys(w.byType)))];
   return [
@@ -4335,383 +4406,956 @@ function closeExerciseDetail() {
   document.body.classList.remove('detail-open');
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  PLAN TAB — routines, the week that points at them, and one-off reschedules
+//
+//  The model lives in plan.js (see its header for why routines replaced seven
+//  private day lists). This section owns the writes, the DOM and the wiring.
+//
+//  There is no Save button any more. Every edit here persists the moment it is
+//  made, which is what lets a bottom sheet close on a tap instead of leaving
+//  the tab in a half-edited state you could navigate away from and lose.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** The "Superset" label that heads a paired group in the day view. */
+const SUPERSET_LABEL_HTML = `
+  <div class="superset-label">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>
+      <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+    Superset
+  </div>`;
+
+/**
+ * The next prescription for one exercise on one date. `before: date` means only
+ * sessions STRICTLY EARLIER than this one are read — otherwise checking a set
+ * today would feed back into today's own suggestion.
+ */
+function prescriptionForExercise(ex, date) {
+  return nextPrescription(state.logs, ex, dayForDate(date).routine, {
+    canon: canonicalExerciseId,
+    before: date,
+  });
+}
+
+/** States what a DATE trains and offers the one-off reschedule. */
+function renderRescheduleBar(date) {
+  const bar = document.getElementById('reschedule-bar');
+  const txt = document.getElementById('reschedule-text');
+  if (!bar) return;
+
+  const day = dayForDate(date);
+  bar.hidden = false;
+  txt.innerHTML = day.overridden
+    ? `<strong>${escHtml(day.routine?.name ?? 'Rest')}</strong> <span class="reschedule-changed">· moved here</span>`
+    : `<strong>${escHtml(day.routine?.name ?? 'Rest day')}</strong> <span class="reschedule-sub">· from your weekly plan</span>`;
+
+  const btn = document.getElementById('reschedule-btn');
+  btn.onclick = () => openRescheduleSheet(date);
+}
+
+/** Writes the plan document and mirrors it back into state. The single writer. */
+async function savePlan() {
+  if (!state.plan) return;
+  await put('plan', state.plan);
+}
+
+/**
+ * Stamps an exercise into the orphan registry as archived, so a routine (or a
+ * single exercise) can be deleted without its logged history losing its name.
+ * getExerciseDef already falls back to the registry, so nothing else changes.
+ */
+async function archiveExerciseToRegistry(ex) {
+  if (!ex?.id || !ex.name) return;
+  await upsertRegistryEntry(ex.id, {
+    name: ex.name,
+    unit: ex.unit ?? 'reps',
+    sets: ex.sets ?? 3,
+    reps: ex.reps ?? '8',
+    loadType: ex.loadType,
+    muscles: ex.muscles ?? '',
+    archived: true,
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-//  PLAN TAB
+//  MIGRATION — v1 (seven private day lists) → v2 (routines + week)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Single writer for the plan's dirty flag, so the Save button can state the
- * pending-changes fact instead of it only surfacing as a confirm dialog when
- * you try to leave the tab. Every path that used to assign
- * `state.ui.planDirty` directly goes through here.
+ * Runs once, on the first load after this feature ships. Exercise objects move
+ * across by reference with their ids untouched, so not one logged set is
+ * affected; the archived exercises the old day lists carried are stamped into
+ * the registry so their history keeps resolving a name.
  */
-function setPlanDirty(dirty) {
-  state.ui.planDirty = dirty;
-  document.getElementById('save-plan-btn')
-    ?.classList.toggle('plan-unsaved', dirty);
+async function migratePlanToRoutines() {
+  if (!state.plan || state.plan.routines) return;
+
+  const result = migrateToRoutines(state.plan, { newId: generateId, glyphFor: guessGlyph });
+  if (!result) return;
+
+  for (const ex of result.orphaned) await archiveExerciseToRegistry(ex);
+
+  state.plan = result.plan;
+  await savePlan();
+  console.info('[FitTrack] plan migrated to routines:', result.plan.routines.length);
 }
+
+/** The effective routine for one date — the per-date override, else the week. */
+function dayForDate(date) {
+  return resolveDay(state.plan, state.meta, date, dayIndexOf(date));
+}
+
+/** Sets (or clears, with `null`) the one-off routine override for one date. */
+async function setDayOverride(date, value) {
+  const key = dayPlanKey(date);
+  if (value == null) {
+    if (state.meta[key]) {
+      await del('meta', key);
+      delete state.meta[key];
+    }
+    return;
+  }
+  const doc = { key, value };
+  await put('meta', doc);
+  state.meta[key] = doc;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  BOTTOM SHEET — one reusable surface for every picker below
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Opens the shared bottom sheet. `onMount` receives the body element, so each
+ * caller wires only its own controls. Sheets stack conceptually but not in the
+ * DOM: opening a second one replaces the first, which is the behaviour a
+ * "rule → pick a rule → back" flow wants anyway.
+ */
+function openSheet(title, html, onMount) {
+  const overlay = document.getElementById('sheet-overlay');
+  const body    = document.getElementById('sheet-body');
+  document.getElementById('sheet-title').textContent = title;
+  body.innerHTML = html;
+  overlay.classList.remove('overlay-closing');
+  overlay.hidden = false;
+  document.body.classList.add('sheet-open');
+  onMount?.(body);
+}
+
+function closeSheet() {
+  const overlay = document.getElementById('sheet-overlay');
+  if (overlay.hidden) return;
+  closeOverlayAnimated(overlay, () => {
+    overlay.hidden = true;
+    document.getElementById('sheet-body').innerHTML = '';
+    document.body.classList.remove('sheet-open');
+  });
+}
+
+/** A tappable sheet row: optional leading icon, title, subtitle, trailing tick. */
+function sheetRowHTML({ icon = '', title, sub = '', checked = false, action = '', value = '', danger = false }) {
+  return `
+    <button class="sheet-row${danger ? ' sheet-row-danger' : ''}" type="button"
+            data-sheet-action="${escHtml(action)}" data-value="${escHtml(value)}">
+      ${icon ? `<span class="routine-icon">${icon}</span>` : ''}
+      <span class="sheet-row-main">
+        <span class="sheet-row-title">${escHtml(title)}</span>
+        ${sub ? `<span class="sheet-row-sub">${escHtml(sub)}</span>` : ''}
+      </span>
+      ${checked ? '<span class="sheet-row-check">✓</span>' : ''}
+    </button>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  THUMBNAILS — the small demo frame beside an exercise row
+// ─────────────────────────────────────────────────────────────────────────────
+
+const THUMB_PLACEHOLDER = `
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
+    <path d="m21 15-5-5L5 21"/></svg>`;
+
+/**
+ * The reference entry behind a plan exercise: the id stamped when it was picked
+ * from the library wins, otherwise the authored id-map. Never fuzzy-matched.
+ */
+function referenceForPlanExercise(ex) {
+  if (ex?.refId) {
+    const entry = getReferenceById(ex.refId);
+    // `imageMode: 'remote'` because only the exercises reachable through the
+    // AUTHORED id-map have their frames vendored under data/exercise-images.
+    // Guessing local for the rest would 404 once per picker row.
+    if (entry) return { entry, confidence: 'high', imageMode: 'remote' };
+  }
+  if (!ex?.id) return null;
+  // Also try the canonical id: a movement whose history was reunified under a
+  // newer id still has its reference mapped under one of them.
+  const mapped = referenceForExerciseId(ex.id) ?? referenceForExerciseId(canonicalExerciseId(ex.id));
+  return mapped ? { ...mapped, imageMode: 'local' } : null;
+}
+
+/**
+ * A thumbnail that tries the locally vendored frame first and falls back to the
+ * remote one exactly once — the twenty plan exercises with vendored images stay
+ * fully offline, everything else loads when there is a network and quietly
+ * shows the placeholder when there is not.
+ */
+function exerciseThumbHTML(ex) {
+  const ref = referenceForPlanExercise(ex);
+  const rel = ref?.entry?.images?.[0];
+  if (!rel) return THUMB_PLACEHOLDER;
+  const remote = referenceImageUrl(rel);
+  const src = ref.imageMode === 'local' ? `./data/exercise-images/${rel}` : remote;
+  return `<img class="ex-thumb-img" src="${escHtml(src)}" alt=""
+       loading="lazy" decoding="async" data-remote="${escHtml(remote)}"
+       onerror="if(this.dataset.remote&&this.src!==this.dataset.remote){this.src=this.dataset.remote}else{this.remove()}" />`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PLAN TAB — RENDER
+// ─────────────────────────────────────────────────────────────────────────────
 
 function renderPlan() {
-  const container = document.getElementById('plan-days');
-  if (!state.plan) { container.innerHTML = ''; return; }
+  const week = document.getElementById('plan-week');
+  const list = document.getElementById('plan-routines');
+  if (!week || !list) return;
 
-  container.innerHTML = state.plan.days.map(day => buildPlanDayCardHTML(day)).join('');
-  wirePlanInteractions();
-  setPlanDirty(false); // DOM was just rebuilt from saved state
+  week.innerHTML = buildWeekScheduleHTML(state.plan);
+  list.innerHTML = buildRoutineListHTML(state.plan);
+
+  week.querySelectorAll('[data-plan-action="assign-day"]').forEach(btn => {
+    btn.addEventListener('click', () => openDayAssignSheet(Number(btn.dataset.day)));
+  });
+  list.querySelectorAll('[data-plan-action="open-routine"]').forEach(btn => {
+    btn.addEventListener('click', () => openRoutineEditor(btn.dataset.routine));
+  });
+
+  const newBtn = document.getElementById('new-routine-btn');
+  if (newBtn && !newBtn._wired) {
+    newBtn.addEventListener('click', createRoutine);
+    newBtn._wired = true;
+  }
+}
+
+/** Creates an empty routine and drops straight into its editor. */
+async function createRoutine() {
+  const routine = {
+    id: generateId('rt'),
+    name: 'New routine',
+    glyph: DEFAULT_GLYPH,
+    prog: 'linear',
+    exercises: [],
+  };
+  state.plan.routines = [...routinesOf(state.plan), routine];
+  await savePlan();
+  openRoutineEditor(routine.id);
+}
+
+/** Assigns a routine (or rest) to one weekday of the recurring plan. */
+function openDayAssignSheet(dayIdx) {
+  const current = state.plan?.week?.[dayIdx] ?? null;
+
+  const rows =
+    sheetRowHTML({
+      icon: `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+               <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`,
+      title: 'Rest day', checked: !current, action: 'assign', value: '',
+    }) +
+    routinesOf(state.plan).map(r => sheetRowHTML({
+      icon: glyphSvg(r.glyph, 17),
+      title: r.name,
+      sub: exCountLabel(activeExercises(r).length),
+      checked: current === r.id,
+      action: 'assign', value: r.id,
+    })).join('');
+
+  openSheet(PLAN_DAY_NAMES[dayIdx], rows, (body) => {
+    body.querySelectorAll('[data-sheet-action="assign"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        state.plan.week = { ...(state.plan.week ?? {}), [dayIdx]: btn.dataset.value || null };
+        await savePlan();
+        closeSheet();
+        renderPlan();
+        renderWeekStrip();
+        const picked = routineById(state.plan, btn.dataset.value);
+        showToast(picked ? `${PLAN_DAY_NAMES[dayIdx]}: ${picked.name}` : `${PLAN_DAY_NAMES[dayIdx]} is a rest day`);
+      });
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RESCHEDULE ONE DATE — the "I was ill on Wednesday" escape hatch
+//
+//  Writes a single `dayPlan_<date>` meta key. The weekly plan is not touched,
+//  so next Wednesday is unaffected; clearing the override puts the date back
+//  under the week. This is deliberately a DIFFERENT surface from the weekday
+//  assignment above: one changes every week, the other changes one day.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openRescheduleSheet(date) {
+  const day = dayForDate(date);
+  const currentId = day.overridden ? (day.isRest ? DAY_REST : day.routine?.id) : null;
+
+  const intro = `
+    <p class="sheet-note">
+      Weekly plan: <strong>${escHtml(day.weekly?.name ?? 'Rest')}</strong>${
+        day.overridden ? ' <span class="sheet-note-changed">· changed for this day</span>' : ''
+      }<br />
+      Sick, missed a day, or fewer gym days this week? Pick what to train instead —
+      your weekly plan stays as it is.
+    </p>`;
+
+  const rows =
+    (day.overridden ? sheetRowHTML({
+      icon: `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+               <polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></svg>`,
+      title: 'Follow the weekly plan',
+      sub: day.weekly ? day.weekly.name : 'Rest',
+      action: 'reschedule', value: '__clear__',
+    }) : '') +
+    sheetRowHTML({
+      icon: `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+               <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`,
+      title: 'Rest day', checked: currentId === DAY_REST, action: 'reschedule', value: DAY_REST,
+    }) +
+    routinesOf(state.plan).map(r => sheetRowHTML({
+      icon: glyphSvg(r.glyph, 17),
+      title: r.name,
+      sub: exCountLabel(activeExercises(r).length),
+      checked: currentId === r.id,
+      action: 'reschedule', value: r.id,
+    })).join('');
+
+  openSheet(friendlyDateLabel(date), intro + rows, (body) => {
+    body.querySelectorAll('[data-sheet-action="reschedule"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const v = btn.dataset.value;
+        await setDayOverride(date, v === '__clear__' ? null : v);
+        closeSheet();
+        renderToday();
+        renderWeekStrip();
+        renderHubIfVisible();
+        showToast(
+          v === '__clear__' ? 'Back to the weekly plan'
+            : v === DAY_REST ? `${friendlyDateLabel(date)} set to rest`
+            : `${routineById(state.plan, v)?.name} planned for ${friendlyDateLabel(date)}`
+        );
+      });
+    });
+  });
+}
+
+/** Repaints the hub only when it is the visible tab (cheap guard, used above). */
+function renderHubIfVisible() {
+  if (state.ui.currentView === 'hub') renderHub();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ROUTINE EDITOR
+// ─────────────────────────────────────────────────────────────────────────────
+
+function currentRoutine() {
+  return routineById(state.plan, state.ui.editingRoutineId);
+}
+
+function openRoutineEditor(routineId) {
+  state.ui.editingRoutineId = routineId;
+  switchView('routine');
+}
+
+function renderRoutine() {
+  const routine = currentRoutine();
+  if (!routine) { switchView('plan'); return; }
+
+  const nameInput = document.getElementById('routine-name-input');
+  if (document.activeElement !== nameInput) nameInput.value = routine.name;
+  document.getElementById('routine-glyph-btn').innerHTML = glyphSvg(routine.glyph, 18);
+  document.getElementById('routine-progression').innerHTML = buildProgressionRowHTML(routine);
+
+  renderRoutineExercises(routine);
+  renderRoutineCoverage(routine);
+  wireRoutineEditor(routine);
+}
+
+function renderRoutineExercises(routine) {
+  const host = document.getElementById('routine-exercises');
+  const list = activeExercises(routine);
+
+  if (!list.length) {
+    host.innerHTML = `
+      <div class="plan-empty">
+        <p class="plan-empty-title">No exercises yet.</p>
+        <p class="plan-empty-sub">Add your first one below.</p>
+      </div>`;
+    return;
+  }
+
+  const units = supersetUnits(list);
+  const firstOfPair = new Set(units.filter(u => u.length > 1).map(u => u[0]));
+  const inPair = new Set(units.filter(u => u.length > 1).flat());
+
+  host.innerHTML = `<div class="routine-ex-list">${list.map((ex, i) =>
+    buildRoutineExerciseRowHTML(ex, i, {
+      thumbHtml: exerciseThumbHTML(ex),
+      linkedAbove: i > 0 && !!ex.sg && list[i - 1].sg === ex.sg,
+      inSuperset: inPair.has(i),
+      first: firstOfPair.has(i),
+    })).join('')}</div>`;
 }
 
 /**
- * One editable exercise row in the plan editor. `ex` may be a plan exercise
- * or a fresh blank stub for newly added rows. The unit toggle cycles
- * reps ↔ sec and is read back from data-unit on save.
+ * The coverage card. The body geometry is a dynamic import, so the card draws
+ * its placeholder first and repaints once the artwork lands — the same two-pass
+ * the Stats tab uses.
  */
-function buildPlanExerciseRowHTML(dayIdx, ex) {
-  const unit      = ex.unit ?? 'reps';
-  const isSeconds = unit === 'seconds';
-  return `
-    <div class="plan-exercise-row"
-         data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}"
-         data-load-type="${escHtml(ex.loadType ?? '')}" data-muscles="${escHtml(ex.muscles ?? '')}">
-      <div class="plan-ex-name-wrap">
-        <input class="plan-ex-name" type="text"
-               placeholder="Exercise name"
-               value="${escHtml(ex.name)}"
-               aria-label="Exercise name" autocomplete="off"
-               role="combobox" aria-expanded="false" aria-autocomplete="list"
-               data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
-      </div>
-      <label class="plan-ex-field plan-ex-field-sets">
-        <span class="plan-ex-field-label">Sets</span>
-        <input class="plan-ex-sets" type="number" min="1" max="20"
-               placeholder="Sets"
-               value="${ex.sets}"
-               aria-label="Sets"
-               data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
-      </label>
-      <label class="plan-ex-field plan-ex-field-reps">
-        <span class="plan-ex-field-label">Target</span>
-        <input class="plan-ex-reps" type="text"
-               placeholder="${isSeconds ? 'Sec' : 'Reps'}"
-               value="${escHtml(String(ex.reps))}"
-               aria-label="${isSeconds ? 'Seconds target' : 'Reps target'}"
-               data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}" />
-      </label>
-      <button class="plan-ex-unit${isSeconds ? ' plan-ex-unit-seconds' : ''}"
-              type="button"
-              data-unit="${unit}"
-              aria-label="Unit: ${isSeconds ? 'seconds' : 'reps'}. Tap to switch."
-              data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}">
-        ${isSeconds ? 'sec' : 'reps'}
-      </button>
-      <button class="plan-ex-remove"
-              aria-label="Remove ${escHtml(ex.name || 'exercise')}"
-              data-day="${dayIdx}" data-ex-id="${escHtml(ex.id)}">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2.5"
-             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <line x1="18" y1="6"  x2="6"  y2="18"/>
-          <line x1="6"  y1="6"  x2="18" y2="18"/>
-        </svg>
-      </button>
-    </div>`;
-}
-
-function buildPlanDayCardHTML(day) {
-  const activeEx = (day.exercises ?? []).filter(e => !e.archived);
-  const exRows   = activeEx
-    .map(ex => buildPlanExerciseRowHTML(day.dayIndex, ex))
-    .join('');
-
-  // Day-level bulk actions only make sense when the day has a program
-  const hasProgram = activeEx.length > 0 || (day.sessionName ?? '') !== '';
-  const dayActions = hasProgram ? `
-      <div class="plan-day-actions">
-        <button class="btn-ghost plan-move-day-btn" data-day="${day.dayIndex}">
-          ⇢ Move day…
-        </button>
-        <button class="btn-ghost plan-delete-day-btn" data-day="${day.dayIndex}">
-          ✕ Delete day
-        </button>
-      </div>` : '';
-
-  return `
-    <div class="card plan-day-card" data-day="${day.dayIndex}">
-      <div class="plan-day-header">
-        <span class="plan-day-label">${DAY_NAMES_LONG[day.dayIndex]}</span>
-        <input class="plan-session-name-input" type="text"
-               placeholder="${day.isRest ? 'Rest (leave blank)' : 'e.g. Push Day'}"
-               value="${escHtml(day.sessionName ?? '')}"
-               aria-label="Session name for ${DAY_NAMES_LONG[day.dayIndex]}"
-               data-day="${day.dayIndex}" />
-      </div>
-      <div class="plan-exercises-header" aria-hidden="true">
-        <span>Exercise</span>
-        <span>Sets</span>
-        <span>Target</span>
-        <span></span>
-        <span></span>
-      </div>
-      <div class="plan-exercises-list" data-day="${day.dayIndex}">
-        ${exRows}
-      </div>
-      <button class="btn-ghost plan-add-ex-btn" data-day="${day.dayIndex}">
-        + Add exercise
-      </button>
-      ${dayActions}
-    </div>`;
-}
-
-function wirePlanInteractions() {
-  const container = document.getElementById('plan-days');
-  document.getElementById('save-plan-btn').onclick = handleSavePlan;
-
-  // Any typing in a plan field marks the tab dirty (delegated, wired once)
-  if (!container._dirtyWired) {
-    container.addEventListener('input', () => { setPlanDirty(true); });
-    container._dirtyWired = true;
+function renderRoutineCoverage(routine) {
+  const host = document.getElementById('routine-coverage');
+  const load = routineLoad(routine, resolveExerciseMuscles);
+  host.innerHTML = buildRoutineCoverageHTML(routine, buildLoadBodyMap(load));
+  if (!bodyPathsReady()) {
+    loadBodyPaths().then(() => {
+      if (state.ui.currentView === 'routine' && currentRoutine()?.id === routine.id) {
+        renderRoutineCoverage(currentRoutine());
+      }
+    });
   }
+}
 
-  // "Add exercise" — inserts a new row directly into the list without rebuilding
-  container.querySelectorAll('.plan-add-ex-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const dayIdx = parseInt(btn.dataset.day, 10);
-      const list   = container.querySelector(
-        `.plan-exercises-list[data-day="${dayIdx}"]`
-      );
-      const stub = { id: generateId('ex'), name: '', sets: 3, reps: '8', unit: 'reps' };
-      list.insertAdjacentHTML('beforeend', buildPlanExerciseRowHTML(dayIdx, stub));
-      const row = list.lastElementChild;
-      wireRemoveButton(row.querySelector('.plan-ex-remove'));
-      wireUnitToggle(row.querySelector('.plan-ex-unit'));
-      wirePlanExerciseName(row);
-      setPlanDirty(true);
-      row.querySelector('.plan-ex-name').focus();
+function wireRoutineEditor(routine) {
+  const host = document.getElementById('view-routine');
+
+  // Exercise rows — config, reorder, superset link.
+  host.querySelectorAll('[data-plan-action]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const i = Number(el.dataset.index);
+      const list = activeExercises(currentRoutine());
+      switch (el.dataset.planAction) {
+        case 'config-exercise':  openExerciseConfigSheet(list[i], i); break;
+        case 'move-up':          await moveRoutineExercise(i, -1); break;
+        case 'move-down':        await moveRoutineExercise(i, 1);  break;
+        case 'toggle-link':      await toggleSuperset(i); break;
+        case 'routine-progression': openProgressionSheet(null); break;
+      }
     });
   });
 
-  // Remove buttons, unit toggles, and name autocomplete on pre-existing rows
-  container.querySelectorAll('.plan-ex-remove').forEach(btn => wireRemoveButton(btn));
-  container.querySelectorAll('.plan-ex-unit').forEach(btn => wireUnitToggle(btn));
-  container.querySelectorAll('.plan-exercise-row').forEach(row => wirePlanExerciseName(row));
+  // One-time wiring for the controls that live in the static markup.
+  if (host._wired) return;
+  host._wired = true;
 
-  // Day-level bulk actions
-  container.querySelectorAll('.plan-delete-day-btn').forEach(btn => {
-    btn.addEventListener('click', () => handleDeleteDay(parseInt(btn.dataset.day, 10)));
-  });
-  container.querySelectorAll('.plan-move-day-btn').forEach(btn => {
-    btn.addEventListener('click', () => handleMoveDay(parseInt(btn.dataset.day, 10)));
-  });
+  document.getElementById('routine-back-btn').addEventListener('click', () => switchView('plan'));
+
+  document.getElementById('routine-name-input').addEventListener('input', debounce(async (e) => {
+    const r = currentRoutine();
+    if (!r) return;
+    r.name = e.target.value.trim() || 'Routine';
+    await savePlan();
+  }, 400));
+
+  document.getElementById('routine-glyph-btn').addEventListener('click', openGlyphPicker);
+  document.getElementById('routine-add-ex-btn').addEventListener('click', () =>
+    openExercisePicker(def => openExerciseConfigSheet(def, null)));
+  document.getElementById('routine-delete-btn').addEventListener('click', deleteRoutine);
 }
 
-function wireRemoveButton(btn) {
-  btn.addEventListener('click', () => {
-    btn.closest('.plan-exercise-row')?.remove();
-    setPlanDirty(true);
-  });
+/** Trailing-edge debounce, so a name typed character by character saves once. */
+function debounce(fn, ms) {
+  let t = null;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-/** Sets a plan row's unit button (and its reps input) to reps or seconds. */
-function setPlanRowUnit(btn, toSeconds) {
-  if (!btn) return;
-  btn.dataset.unit = toSeconds ? 'seconds' : 'reps';
-  btn.textContent  = toSeconds ? 'sec' : 'reps';
-  btn.classList.toggle('plan-ex-unit-seconds', toSeconds);
-  btn.setAttribute('aria-label', `Unit: ${toSeconds ? 'seconds' : 'reps'}. Tap to switch.`);
-  const repsInput = btn.closest('.plan-exercise-row')?.querySelector('.plan-ex-reps');
-  if (repsInput) {
-    repsInput.placeholder = toSeconds ? 'Sec' : 'Reps';
-    repsInput.setAttribute('aria-label', toSeconds ? 'Seconds target' : 'Reps target');
+/** The index of the nth ACTIVE exercise inside the routine's full array. */
+function activeIndexToReal(routine, activeIdx) {
+  let seen = -1;
+  for (let i = 0; i < routine.exercises.length; i++) {
+    if (routine.exercises[i].archived) continue;
+    if (++seen === activeIdx) return i;
   }
+  return -1;
 }
 
-/** Cycles a plan row's unit button reps ↔ sec; read back via data-unit on save. */
-function wireUnitToggle(btn) {
-  btn.addEventListener('click', () => {
-    setPlanRowUnit(btn, btn.dataset.unit !== 'seconds');
-    setPlanDirty(true);
-  });
+async function moveRoutineExercise(activeIdx, dir) {
+  const routine = currentRoutine();
+  const list = activeExercises(routine);
+  const target = activeIdx + dir;
+  if (target < 0 || target >= list.length) return;
+
+  const a = activeIndexToReal(routine, activeIdx);
+  const b = activeIndexToReal(routine, target);
+  const ex = routine.exercises;
+  [ex[a], ex[b]] = [ex[b], ex[a]];
+  cleanupSupersets(activeExercises(routine));
+
+  await savePlan();
+  renderRoutine();
 }
 
-/**
- * Binds the shared library autocomplete to a plan row's name input: picking an
- * entry fills the name and stamps loadType / unit / muscles onto the row, so a
- * plan exercise is correctly typed from creation (no later migration needed).
- * Typing after a pick clears the stamped type; a free-typed name stays a
- * custom, untyped exercise (resolved by the existing name/orphan flow).
- */
-function wirePlanExerciseName(row) {
-  const nameInput = row.querySelector('.plan-ex-name');
-  if (!nameInput) return;
-  attachExerciseAutocomplete(nameInput, {
-    provider: exerciseSuggestionProvider,
-    container: row.querySelector('.plan-ex-name-wrap'),
-    onSelect: (sel) => {
-      setPlanDirty(true);
-      if (sel.isNew) { row.dataset.loadType = ''; row.dataset.muscles = ''; return; }
-      const def = sel.def;
-      nameInput.value = def.name;
-      setPlanRowUnit(row.querySelector('.plan-ex-unit'), def.unit === 'seconds');
-      row.dataset.loadType = def.loadType || '';
-      row.dataset.muscles  = def.muscles || '';
-    },
-  });
-  // Editing the name by hand invalidates a prior pick's stamped type.
-  nameInput.addEventListener('input', () => { row.dataset.loadType = ''; row.dataset.muscles = ''; });
+/** Links or unlinks an exercise with the one above it into a superset. */
+async function toggleSuperset(activeIdx) {
+  if (activeIdx < 1) return;
+  const routine = currentRoutine();
+  const list = activeExercises(routine);
+  const cur = list[activeIdx], prev = list[activeIdx - 1];
+
+  if (cur.sg && prev.sg && cur.sg === prev.sg) {
+    delete cur.sg;
+  } else {
+    const gid = prev.sg || `sg_${generateId('s')}`;
+    prev.sg = gid;
+    cur.sg = gid;
+  }
+  cleanupSupersets(list);
+
+  await savePlan();
+  renderRoutine();
 }
 
-/**
- * Deletes a full training day's program: every active exercise is soft-
- * archived (so historical logs keep resolving names/PBs) and the day
- * becomes a rest day. Historical logged sets are never touched.
- */
-function handleDeleteDay(dayIdx) {
-  const dayName = DAY_NAMES_LONG[dayIdx];
-  const note = state.ui.planDirty ? ' Unsaved plan edits will be discarded.' : '';
+async function deleteRoutine() {
+  const routine = currentRoutine();
+  if (!routine) return;
+
   showDialog(
-    `Delete ${dayName}'s entire program? The day becomes a rest day. Logged history is kept.${note}`,
+    `Delete "${routine.name}"? Any day it is assigned to becomes a rest day. Logged history is kept.`,
     async () => {
-      const days = state.plan.days.map(day => {
-        if (day.dayIndex !== dayIdx) return day;
-        return {
-          ...day,
-          sessionName: '',
-          isRest: true,
-          exercises: (day.exercises ?? []).map(e => ({ ...e, archived: true })),
-        };
-      });
-      const updated = { ...state.plan, days };
-      await put('plan', updated);
-      state.plan = updated;
-      setPlanDirty(false);
-      renderPlan();
+      for (const ex of routine.exercises ?? []) await archiveExerciseToRegistry(ex);
+
+      state.plan.routines = routinesOf(state.plan).filter(r => r.id !== routine.id);
+      const week = { ...(state.plan.week ?? {}) };
+      for (const k in week) if (week[k] === routine.id) week[k] = null;
+      state.plan.week = week;
+      await savePlan();
+
+      // One-off overrides pointing at it are dropped too, so a past date does
+      // not silently fall back to a routine the user just deleted.
+      for (const key of Object.keys(state.meta)) {
+        if (key.startsWith('dayPlan_') && state.meta[key]?.value === routine.id) {
+          await del('meta', key);
+          delete state.meta[key];
+        }
+      }
+
+      state.ui.editingRoutineId = null;
+      switchView('plan');
       renderWeekStrip();
-      showToast(`${dayName}'s program deleted.`);
-    }
+      showToast(`"${routine.name}" deleted.`);
+    },
+    { confirmLabel: 'Delete' }
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ROUTINE ICON PICKER
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openGlyphPicker() {
+  const routine = currentRoutine();
+  const grid = `<div class="glyph-grid">${Object.keys(GLYPHS).map(name => `
+    <button class="glyph-option${glyphOf(routine.glyph) === name ? ' is-on' : ''}" type="button"
+            data-glyph="${name}" aria-label="Icon: ${name}">${glyphSvg(name, 20)}</button>`).join('')}</div>`;
+
+  openSheet('Routine icon', grid, (body) => {
+    body.querySelectorAll('[data-glyph]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const r = currentRoutine();
+        r.glyph = btn.dataset.glyph;
+        await savePlan();
+        closeSheet();
+        renderRoutine();
+      });
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PROGRESSION RULE PICKER
+//
+//  `exercise` null → the routine's own default. Otherwise the per-exercise
+//  override, which additionally offers "follow the routine".
+// ─────────────────────────────────────────────────────────────────────────────
+
+function openProgressionSheet(exerciseDraft, onPick) {
+  const routine = currentRoutine();
+  const mode = exerciseDraft ? loggingModeOf(exerciseDraft) : 'reps';
+  const allowed = POLICIES_FOR[mode] ?? ['off'];
+  const current = exerciseDraft ? (exerciseDraft.prog ?? '') : (routine?.prog || 'linear');
+
+  const followRow = exerciseDraft ? sheetRowHTML({
+    title: `Follow the routine (${POLICY_NAME[routine?.prog || 'linear']})`,
+    sub: 'Whatever this routine is set to, including later changes.',
+    checked: !current, action: 'policy', value: '',
+  }) : '';
+
+  const rows = allowed.map(p => sheetRowHTML({
+    title: POLICY_NAME[p], sub: POLICY_DESC[p],
+    checked: current === p, action: 'policy', value: p,
+  })).join('');
+
+  openSheet('Progression', followRow + rows, (body) => {
+    body.querySelectorAll('[data-sheet-action="policy"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const v = btn.dataset.value;
+        if (exerciseDraft) {
+          closeSheet();
+          onPick?.(v);
+          return;
+        }
+        currentRoutine().prog = v || 'linear';
+        await savePlan();
+        closeSheet();
+        renderRoutine();
+      });
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  EXERCISE PICKER
+//
+//  Two sources, in this order: exercises the user has ALREADY logged (picking
+//  one reuses its id, so history and PBs stay attached), then the vendored
+//  open reference dataset. That order is the whole point — a fresh id for a
+//  movement already in the log would silently fork its history.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PICKER_LIMIT = 40;
+
+function openExercisePicker(onPick) {
+  const html = `
+    <input type="search" class="lib-search sheet-search" id="picker-search"
+           placeholder="Search exercises…" aria-label="Search exercises" autocomplete="off" />
+    <div class="sheet-list" id="picker-results"></div>`;
+
+  openSheet('Add exercise', html, (body) => {
+    const input = body.querySelector('#picker-search');
+    const out   = body.querySelector('#picker-results');
+
+    const paint = () => {
+      const q = input.value.trim();
+      out.innerHTML = buildPickerResultsHTML(q);
+      out.querySelectorAll('[data-pick-known]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const def = buildKnownExerciseList().find(e => e.id === btn.dataset.pickKnown);
+          if (def) onPick(planExerciseFromKnown(def));
+        });
+      });
+      out.querySelectorAll('[data-pick-ref]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const entry = getReferenceById(btn.dataset.pickRef);
+          if (entry) onPick(planExerciseFromReference(entry));
+        });
+      });
+    };
+
+    input.addEventListener('input', debounce(paint, 140));
+    paint();
+    input.focus();
+  });
+}
+
+function buildPickerResultsHTML(query) {
+  const q = query.toLowerCase();
+  const known = buildKnownExerciseList()
+    .filter(e => !q || e.name.toLowerCase().includes(q))
+    .slice(0, 8);
+
+  const refs = filterReference({ query, category: 'lifting' }).slice(0, PICKER_LIMIT);
+
+  const knownBlock = known.length ? `
+    <h4 class="sheet-group-label">Your exercises</h4>
+    ${known.map(e => `
+      <button class="sheet-row" type="button" data-pick-known="${escHtml(e.id)}">
+        <span class="routine-ex-thumb">${exerciseThumbHTML(e)}</span>
+        <span class="sheet-row-main">
+          <span class="sheet-row-title">${escHtml(e.name)}</span>
+          <span class="sheet-row-sub">${escHtml(e.muscles || 'Keeps its logged history')}</span>
+        </span>
+      </button>`).join('')}` : '';
+
+  const refBlock = refs.length ? `
+    <h4 class="sheet-group-label">Exercise library</h4>
+    ${refs.map(entry => `
+      <button class="sheet-row" type="button" data-pick-ref="${escHtml(entry.id)}">
+        <span class="routine-ex-thumb">${exerciseThumbHTML({ refId: entry.id })}</span>
+        <span class="sheet-row-main">
+          <span class="sheet-row-title">${escHtml(entry.name)}</span>
+          <span class="sheet-row-sub">${escHtml([refLabel(entry.primaryMuscles?.[0]), refLabel(entry.equipment)].filter(Boolean).join(' · '))}</span>
+        </span>
+      </button>`).join('')}` : '';
+
+  if (!knownBlock && !refBlock) {
+    return `<p class="mm-empty">Nothing matches "${escHtml(query)}".</p>`;
+  }
+  return knownBlock + refBlock;
+}
+
+/** A plan exercise built from one the user has logged before — id preserved. */
+function planExerciseFromKnown(def) {
+  return {
+    id: def.id,
+    name: def.name,
+    sets: def.sets ?? 3,
+    reps: def.reps ?? '8',
+    unit: def.unit ?? 'reps',
+    loadType: def.loadType ?? getExerciseLoadType(def.id) ?? undefined,
+    muscles: def.muscles ?? resolveExerciseMuscles(def),
+    cue: def.cue ?? '',
+  };
 }
 
 /**
- * Moves a full day's program to another day (cut & paste): the target day's
- * current program is overwritten — its exercises are soft-archived so
- * historical logs stay resolvable — and the source day becomes empty.
+ * A plan exercise built from a reference entry. The loadType comes from the
+ * vendored library when the name matches (the authoritative source), and only
+ * falls back to an equipment reading when it does not — "body only" is a
+ * bodyweight movement, and that is a fact about the equipment, not a guess.
  */
-function handleMoveDay(sourceIdx) {
-  const sourceName = DAY_NAMES_LONG[sourceIdx];
-  const options = state.plan.days
-    .filter(d => d.dayIndex !== sourceIdx)
-    .map(d => ({
-      value: String(d.dayIndex),
-      label: DAY_NAMES_LONG[d.dayIndex] +
-        (d.isRest ? ' (rest)' : d.sessionName ? ` (${d.sessionName})` : ''),
-    }));
-  const note = state.ui.planDirty ? ' Unsaved plan edits will be discarded.' : '';
+function planExerciseFromReference(entry) {
+  const lib = matchLibraryEntry(entry.name);
+  const loadType = lib?.loadType
+    ?? (entry.equipment === 'body only' ? 'bodyweight' : 'weighted');
+  return {
+    id: generateId('ex'),
+    refId: entry.id,
+    name: entry.name,
+    sets: 3,
+    reps: '8',
+    unit: 'reps',
+    loadType,
+    muscles: [...(entry.primaryMuscles ?? []), ...(entry.secondaryMuscles ?? [])].join(' · '),
+    cue: '',
+  };
+}
 
-  showFormDialog(
-    `Move ${sourceName}'s program to another day? The target day's current program is overwritten and cannot be recovered, and ${sourceName} becomes empty.${note}`,
-    [{ name: 'target', label: 'Move to', options }],
-    async ({ target }) => {
-      const targetIdx = parseInt(target, 10);
-      if (isNaN(targetIdx) || targetIdx === sourceIdx) return;
+// ─────────────────────────────────────────────────────────────────────────────
+//  EXERCISE CONFIG SHEET
+//
+//  Edits a DRAFT copy and only writes it on Save, so backing out of the sheet
+//  cannot half-apply a change. `index` null means "not in the routine yet".
+// ─────────────────────────────────────────────────────────────────────────────
 
-      const days = state.plan.days.map(day => {
-        if (day.dayIndex === sourceIdx) {
-          // Source is cleared — its exercises (incl. archived) travel with the move
-          return { ...day, sessionName: '', isRest: true, exercises: [] };
-        }
-        if (day.dayIndex === targetIdx) {
-          const src = state.plan.days[sourceIdx];
-          // Target's previous program is discarded from the schedule but
-          // soft-archived so its logged history keeps resolving
-          const displaced = (day.exercises ?? []).map(e => ({ ...e, archived: true }));
-          return {
-            ...day,
-            sessionName: src.sessionName,
-            isRest: src.isRest,
-            exercises: [...(src.exercises ?? []), ...displaced],
-          };
-        }
-        return day;
+function stepperHTML(field, label, value, { step = 1, min = 0 } = {}) {
+  return `
+    <div class="stepper-field">
+      <span class="stepper-label">${escHtml(label)}</span>
+      <div class="stepper" data-stepper="${field}" data-step="${step}" data-min="${min}">
+        <button class="stepper-btn" type="button" data-delta="-1" aria-label="Decrease ${escHtml(label)}">−</button>
+        <input class="stepper-value" type="number" inputmode="decimal" step="${step}" min="${min}"
+               value="${escHtml(String(value))}" aria-label="${escHtml(label)}" />
+        <button class="stepper-btn" type="button" data-delta="1" aria-label="Increase ${escHtml(label)}">+</button>
+      </div>
+    </div>`;
+}
+
+function toggleRowHTML(field, title, sub, on, iconPath) {
+  return `
+    <div class="config-toggle-row">
+      <span class="routine-icon routine-icon-sm">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPath}</svg>
+      </span>
+      <span class="config-toggle-text">
+        <span class="config-toggle-title">${escHtml(title)}</span>
+        <span class="config-toggle-sub">${escHtml(sub)}</span>
+      </span>
+      <button class="settings-toggle" type="button" role="switch" aria-checked="${on}"
+              data-config-toggle="${field}" aria-label="${escHtml(title)}">
+        <span class="settings-toggle-knob"></span>
+      </button>
+    </div>`;
+}
+
+function openExerciseConfigSheet(source, index) {
+  const routine = currentRoutine();
+  const draft = { ...source };
+  draft.sets = Number(draft.sets) || 3;
+  draft.weight = Number(draft.weight) || 0;
+
+  const render = () => {
+    const isTimed = draft.loadType === 'timed' || draft.unit === 'seconds';
+    const isBw    = draft.loadType === 'bodyweight';
+    const ref     = referenceForPlanExercise(draft);
+    const effortLabel = isTimed ? 'Seconds' : 'Reps';
+    const effortVal   = String(draft.reps ?? (isTimed ? '30' : '8'));
+
+    const chips = ref ? [refLabel(ref.entry.primaryMuscles?.[0]), refLabel(ref.entry.equipment)]
+      .filter(Boolean).map(c => `<span class="mm-chip">${escHtml(c)}</span>`).join('') : '';
+
+    const policy = policyFor(draft, routine);
+    const ruleLabel = draft.prog
+      ? POLICY_NAME[draft.prog]
+      : `Follow the routine (${POLICY_NAME[routine?.prog || 'linear']})`;
+    const stepUnit = loggingModeOf(draft) === 'time' ? 's' : 'kg';
+
+    return `
+      ${ref ? refFramesHTML(ref.entry, ref.imageMode ?? 'remote') : ''}
+      ${chips ? `<div class="mm-chips config-chips">${chips}</div>` : ''}
+
+      <div class="segmented config-mode" role="tablist">
+        <button class="segmented-btn${!isTimed ? ' is-on' : ''}" type="button" data-mode="reps" role="tab" aria-selected="${!isTimed}">Reps</button>
+        <button class="segmented-btn${isTimed ? ' is-on' : ''}" type="button" data-mode="time" role="tab" aria-selected="${isTimed}">Time</button>
+      </div>
+
+      <div class="stepper-row">
+        ${stepperHTML('sets', 'Sets', draft.sets, { step: 1, min: 1 })}
+        ${stepperHTML('reps', effortLabel, effortVal, { step: 1, min: 1 })}
+        ${!isTimed ? stepperHTML('weight', 'Weight (kg)', draft.weight, { step: 0.5, min: 0 }) : ''}
+      </div>
+
+      <div class="config-toggles">
+        ${toggleRowHTML('bodyweight', 'Bodyweight', 'Ask for a weight on every set.', isBw,
+          '<circle cx="12" cy="4.5" r="1.8"/><path d="M12 7v6"/><path d="M6 9l6 2 6-2"/><path d="M12 13l-3 8"/><path d="M12 13l3 8"/>')}
+        ${toggleRowHTML('perSide', 'Reps per side', 'For lunges, single-arm rows and the like.', !!draft.perSide,
+          '<path d="M8 7 4 11l4 4"/><path d="M16 7l4 4-4 4"/><path d="M4 11h16"/>')}
+      </div>
+
+      <h4 class="sheet-group-label">Progression</h4>
+      <button class="plan-row plan-row-setting" type="button" data-config-rule>
+        <span class="plan-row-title">Rule</span>
+        <span class="plan-row-value">${escHtml(ruleLabel)}</span>
+        ${CONFIG_CHEVRON}
+      </button>
+      <p class="plan-section-note">${escHtml(POLICY_DESC[policy])}</p>
+      ${policy !== 'off' ? `<div class="stepper-row stepper-row-single">
+        ${stepperHTML('inc', `Step (${stepUnit})`, incrementFor(draft), { step: 0.5, min: 0.5 })}
+      </div>` : ''}
+
+      <button class="btn-primary btn-block" type="button" data-config-save>Save</button>
+      ${index != null ? `<button class="btn-danger btn-block" type="button" data-config-remove>Remove from routine</button>` : ''}`;
+  };
+
+  const mount = (body) => {
+    body.innerHTML = render();
+
+    body.querySelectorAll('[data-ref-frames-toggle]').forEach(btn => {
+      btn.addEventListener('click', () => btn.closest('[data-ref-frames]')?.classList.toggle('ref-frames-show-1'));
+    });
+
+    // Reps ↔ Time. Switching to Time makes it a timed exercise; switching back
+    // restores a loaded type rather than leaving it in limbo.
+    body.querySelectorAll('[data-mode]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const toTime = btn.dataset.mode === 'time';
+        draft.unit = toTime ? 'seconds' : 'reps';
+        draft.loadType = toTime ? 'timed' : (draft.loadType === 'timed' ? 'weighted' : draft.loadType);
+        if (toTime && !/^\d/.test(String(draft.reps))) draft.reps = '30';
+        draft.prog = ''; // the old rule may not be legal in the new mode
+        mount(body);
       });
+    });
 
-      const updated = { ...state.plan, days };
-      await put('plan', updated);
-      state.plan = updated;
-      setPlanDirty(false);
-      renderPlan();
-      renderWeekStrip();
-      showToast(`Moved ${sourceName}'s program to ${DAY_NAMES_LONG[targetIdx]}.`);
+    body.querySelectorAll('.stepper').forEach(st => {
+      const input = st.querySelector('.stepper-value');
+      const field = st.dataset.stepper;
+      const step  = Number(st.dataset.step);
+      const min   = Number(st.dataset.min);
+      const commit = (v) => {
+        const n = Math.max(min, Math.round(v / step) * step);
+        const clean = Number(n.toFixed(2));
+        input.value = String(clean);
+        if (field === 'reps') draft.reps = String(clean);
+        else draft[field] = clean;
+      };
+      st.querySelectorAll('.stepper-btn').forEach(btn => {
+        btn.addEventListener('click', () => commit((Number(input.value) || 0) + Number(btn.dataset.delta) * step));
+      });
+      input.addEventListener('change', () => commit(Number(input.value) || min));
+    });
+
+    body.querySelectorAll('[data-config-toggle]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.configToggle;
+        if (field === 'bodyweight') {
+          draft.loadType = draft.loadType === 'bodyweight' ? 'weighted' : 'bodyweight';
+          draft.prog = '';
+        } else {
+          draft.perSide = !draft.perSide;
+        }
+        mount(body);
+      });
+    });
+
+    body.querySelector('[data-config-rule]')?.addEventListener('click', () => {
+      openProgressionSheet(draft, (v) => {
+        draft.prog = v;
+        openExerciseConfigSheetWith(draft, index, source);
+      });
+    });
+
+    body.querySelector('[data-config-save]')?.addEventListener('click', async () => {
+      await commitExerciseDraft(draft, index);
+      closeSheet();
+    });
+
+    body.querySelector('[data-config-remove]')?.addEventListener('click', () => {
+      closeSheet();
+      confirmRemoveExercise(index);
+    });
+  };
+
+  openSheet(draft.name, '', mount);
+}
+
+/** Reopens the config sheet on an in-progress draft (after the rule picker). */
+function openExerciseConfigSheetWith(draft, index) {
+  openExerciseConfigSheet(draft, index);
+}
+
+/** Writes a finished draft into the routine — appending, or replacing in place. */
+async function commitExerciseDraft(draft, index) {
+  const routine = currentRoutine();
+  if (!routine) return;
+
+  const entry = { ...draft };
+  if (!entry.prog) delete entry.prog;      // "" means follow the routine
+  if (!entry.perSide) delete entry.perSide;
+  if (!(entry.weight > 0)) delete entry.weight;
+  entry.sets = Number(entry.sets) || 3;
+  entry.reps = String(entry.reps ?? '8');
+  entry.archived = false;
+
+  if (index == null) {
+    routine.exercises = [...(routine.exercises ?? []), entry];
+  } else {
+    const real = activeIndexToReal(routine, index);
+    // The superset id belongs to the POSITION, not to the exercise, so it is
+    // carried over rather than taken from the draft.
+    entry.sg = routine.exercises[real]?.sg;
+    if (!entry.sg) delete entry.sg;
+    routine.exercises[real] = entry;
+  }
+
+  await savePlan();
+  renderRoutine();
+}
+
+function confirmRemoveExercise(index) {
+  const routine = currentRoutine();
+  const ex = activeExercises(routine)[index];
+  if (!ex) return;
+
+  showDialog(
+    `Remove "${ex.name}" from ${routine.name}? Its logged history is kept.`,
+    async () => {
+      await archiveExerciseToRegistry(ex);
+      const real = activeIndexToReal(routine, index);
+      routine.exercises.splice(real, 1);
+      cleanupSupersets(activeExercises(routine));
+      await savePlan();
+      renderRoutine();
+      showToast(`"${ex.name}" removed.`);
     },
-    'Move'
+    { confirmLabel: 'Remove' }
   );
 }
 
-async function handleSavePlan() {
-  if (!state.plan) return;
-  const container  = document.getElementById('plan-days');
-
-  const updatedDays = state.plan.days.map(day => {
-    const sessionInput = container.querySelector(
-      `.plan-session-name-input[data-day="${day.dayIndex}"]`
-    );
-    const sessionName = sessionInput?.value.trim() ?? day.sessionName;
-
-    const rows = container.querySelectorAll(
-      `.plan-exercise-row[data-day="${day.dayIndex}"]`
-    );
-    const updatedExercises = [];
-
-    rows.forEach(row => {
-      const exId   = row.dataset.exId;
-      const name   = row.querySelector('.plan-ex-name')?.value.trim();
-      if (!name) return; // skip blank rows
-
-      const sets   = parseInt(row.querySelector('.plan-ex-sets')?.value, 10) || 3;
-      const reps   = row.querySelector('.plan-ex-reps')?.value.trim() || '8';
-      const unit   = row.querySelector('.plan-ex-unit')?.dataset.unit === 'seconds'
-        ? 'seconds' : 'reps';
-      const origin = day.exercises?.find(e => e.id === exId);
-      // Type stamped when the name was picked from the library; otherwise keep
-      // the existing type, or leave it to name-resolution on load.
-      const loadType = row.dataset.loadType || origin?.loadType || '';
-      const muscles  = row.dataset.muscles  || origin?.muscles  || '';
-
-      const entry = {
-        id:       exId,
-        name,
-        sets,
-        reps,
-        unit,
-        muscles,
-        cue:      origin?.cue ?? '',
-        archived: false,
-      };
-      if (loadType) entry.loadType = loadType;
-      updatedExercises.push(entry);
-    });
-
-    // Soft-archive exercises removed from the DOM (preserves their log history)
-    const domIds   = new Set(updatedExercises.map(e => e.id));
-    const archived = (day.exercises ?? [])
-      .filter(e => !e.archived && !domIds.has(e.id))
-      .map(e => ({ ...e, archived: true }));
-
-    return {
-      ...day,
-      sessionName,
-      isRest: sessionName === '' && updatedExercises.length === 0,
-      exercises: [...updatedExercises, ...archived],
-    };
-  });
-
-  const updated = { ...state.plan, days: updatedDays };
-  await put('plan', updated);
-  state.plan = updated;
-  setPlanDirty(false);
-
-  showToast('Plan saved.');
-  renderWeekStrip();
-}
-
+const CONFIG_CHEVRON = `<svg class="row-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none"
+     stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>`;
 // ─────────────────────────────────────────────────────────────────────────────
 //  DATA TAB
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5052,6 +5696,9 @@ async function handleImport(event) {
 
         await loadState();
         await dropRetiredMeta();
+        // A backup written before routines existed carries a v1 plan; bring it
+        // forward exactly as a first load would, or the Plan tab reads empty.
+        await migratePlanToRoutines();
         await migrateExerciseUnits();
         await migrateInclineDbLabel();
         await migrateExerciseLoadTypes();
