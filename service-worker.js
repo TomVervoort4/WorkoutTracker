@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v35";
+const CACHE_VERSION = "v37";
 const CACHE_NAME = `fittrack-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -7,10 +7,15 @@ const APP_SHELL = [
   "./app.js",
   "./db.js",
   "./insights.js",
+  "./heatmaps.js",
+  "./muscles.js",
   "./bodycomp.js",
   "./reference.js",
   // Vendored SheetJS — precached so Fitdays imports work with no network
   "./vendor/xlsx.full.min.js",
+  // Vendored muscle-map geometry (MuscleMap, MIT) — precached so the Stats
+  // tab draws the body diagram with no network. Loaded by dynamic import.
+  "./vendor/body-paths.js",
   // Vendored exercise library — precached so exercise typing works offline
   "./vendor/exercise-library.json",
   // Open reference dataset + authored id-map — precached so exercise detail

@@ -163,19 +163,33 @@
 
     </section>
 
-    <!-- ── PROGRESS TAB ── -->
-    <section class="tab-view" id="view-progress" role="tabpanel" aria-label="Progress" hidden>
+    <!-- ── STATS TAB — the analytics hub: tiles, activity, muscle map,
+         volume and per-exercise progress all live here ── -->
+    <section class="tab-view" id="view-stats" role="tabpanel" aria-label="Stats" hidden>
+
+      <div class="section-header stats-header">
+        <h2 class="section-title">Stats</h2>
+        <span class="stats-sub">Progress &amp; history</span>
+      </div>
+
+      <!-- Four headline counts — JS renders them -->
+      <div class="stat-tiles" id="stat-tiles"></div>
+
+      <!-- Activity heatmap — JS renders the card from heatmaps.js -->
+      <div id="stats-activity"></div>
+
+      <!-- Muscle map — balance / fatigue / strength, from heatmaps.js -->
+      <div id="stats-muscle-map"></div>
 
       <div class="section-header">
         <h2 class="section-title">Weekly Volume by Session</h2>
       </div>
       <div class="card chart-card" id="volume-chart-card">
-        <canvas id="volume-chart" aria-label="Weekly volume chart" role="img"></canvas>
         <p class="chart-empty" id="volume-chart-empty">Complete some sessions to see volume trends.</p>
       </div>
 
       <div class="section-header">
-        <h2 class="section-title">Exercise History</h2>
+        <h2 class="section-title">Exercise Progress</h2>
       </div>
       <div class="card" id="exercise-history-card">
         <select class="select-input" id="history-exercise-select" aria-label="Select exercise to view history">
@@ -187,6 +201,13 @@
         <div class="history-list stagger-children" id="history-list">
           <!-- JS renders history rows here -->
         </div>
+      </div>
+
+      <div class="section-header">
+        <h2 class="section-title">Recent Sessions</h2>
+      </div>
+      <div class="recent-sessions" id="recent-sessions">
+        <!-- JS renders one row per recent session date here -->
       </div>
 
     </section>
@@ -368,13 +389,13 @@
       </svg>
       <span>Today</span>
     </button>
-    <button class="nav-tab" data-view="progress" aria-label="Progress charts" aria-selected="false" role="tab">
+    <button class="nav-tab" data-view="stats" aria-label="Stats" aria-selected="false" role="tab">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <line x1="18" y1="20" x2="18" y2="10"/>
         <line x1="12" y1="20" x2="12" y2="4"/>
         <line x1="6" y1="20" x2="6" y2="14"/>
       </svg>
-      <span>Progress</span>
+      <span>Stats</span>
     </button>
     <button class="nav-tab" data-view="body" aria-label="Body composition" aria-selected="false" role="tab">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

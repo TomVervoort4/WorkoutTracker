@@ -8,7 +8,7 @@
 
 import { get, put, del, getAll, getAllKeys, putMany, clear } from './db.js';
 import { setAliasMap, checkForNewPB, computeRecentPRs, computePlateaus, computeExerciseSeries, getExercisePR } from './insights.js';
-import { buildActivityHeatmapCard, buildMuscleFocusCard } from './heatmaps.js';
+import { buildActivityHeatmapCard, buildMuscleMapCard, loadBodyPaths, bodyPathsReady } from './heatmaps.js';
 import {
   loadReference,
   loadExerciseMap,
@@ -24,7 +24,6 @@ import {
   renderBodyTab,
   importSummaryMessage,
   toDailySeries,
-  buildRecompChartSVG,
   fmt as bcFmt,
   deltaBadge as bcDeltaBadge,
   longDate as bcLongDate,
@@ -272,13 +271,17 @@ const state = {
 
   /** Transient UI state — never written to IndexedDB. */
   ui: {
-    currentView: 'hub',           // 'hub' | 'today' | 'progress' | 'body' | 'plan' | 'data'
+    currentView: 'hub',           // 'hub' | 'today' | 'stats' | 'body' | 'plan' | 'library' | 'data'
     today: '',                    // 'YYYY-MM-DD'
     weekDates: [],                // [Mon … Sun] date strings for current week
     todayDayIndex: 0,             // 0=Mon … 6=Sun
     viewedDate: '',               // 'YYYY-MM-DD' — date shown in the Today/day-view tab
     expandedExerciseId: null,     // exercise ID whose accordion is open, or null
     planDirty: false,             // Plan tab has edits not yet saved to the DB
+    // Stats tab · muscle-map card. Which of the three readings is showing,
+    // which window the balance reading counts over, and which muscle (if any)
+    // is tapped. View state only — nothing here is persisted.
+    muscleMap: { tab: 'balance', win: 30, selected: null },
     _dialogConfirmCallback: null, // pending confirm action
     _dialogExtraCallback: null,   // pending non-closing extra action (e.g. Back up first)
   },
@@ -1047,7 +1050,7 @@ function render() {
   switch (state.ui.currentView) {
     case 'hub':      renderHub();          break;
     case 'today':    renderToday();        break;
-    case 'progress': renderProgress();     break;
+    case 'stats':    renderStats();        break;
     case 'body':     renderBodyTab(state.bodyComposition); break;
     case 'plan':     renderPlan();         break;
     case 'library':  renderLibrary();      break;
@@ -2307,28 +2310,6 @@ function buildHubBody(days) {
     </div>`;
 }
 
-function buildHubTrend(days) {
-  const svg = buildRecompChartSVG(days);
-  if (!svg) return ''; // fewer than two comparable readings — the body card already invites more
-
-  return `
-    <button class="card hub-card hub-trend" data-hub-action="open-body">
-      <div class="hub-card-head">
-        <span class="hub-card-title">Recomposition</span>
-        <div class="hub-legend">
-          <span class="hub-legend-item"><span class="bc-swatch bc-swatch-lean" aria-hidden="true"></span>Lean</span>
-          <span class="hub-legend-item"><span class="bc-swatch bc-swatch-fat" aria-hidden="true"></span>Fat</span>
-        </div>
-      </div>
-      ${svg}
-      <span class="hub-trend-link">View full trend
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <polyline points="9 18 15 12 9 6"/></svg>
-      </span>
-    </button>`;
-}
-
 function buildHubPRs() {
   // Module 1 — records on the spec metric: estimated-1RM for compounds, top
   // weight for isolation, longest hold for timed work. Computed in insights.js.
@@ -2381,16 +2362,6 @@ function buildHubPlateaus() {
     </div>`;
 }
 
-/** Activity heatmap — completed sets per day, GitHub-style. Computed in heatmaps.js. */
-function buildHubActivityHeatmap() {
-  return buildActivityHeatmapCard(state.logs, { today: state.ui.today });
-}
-
-/** Muscle focus — completed sets per primary muscle, last 30 days. Computed in heatmaps.js. */
-function buildHubMuscleFocus() {
-  return buildMuscleFocusCard(state, { today: state.ui.today });
-}
-
 /**
  * Addition 6 — a quiet "last backup" recency card. Its only computation is
  * (today − lastBackupDate) in whole days, compared against LAST_BACKUP_STALE_DAYS.
@@ -2429,140 +2400,6 @@ function buildHubLastBackup() {
     </button>`;
 }
 
-/**
- * The "key lift" for the strength-vs-bodyweight overlay: the weighted exercise
- * with the most logged sessions (tie-break by name). Deterministic; null when
- * no weighted lift has enough history.
- */
-function pickKeyLift() {
-  const datesById = new Map();
-  for (const l of state.logs) {
-    if (!l.done || l.weight == null || l.reps == null) continue;
-    if (getExerciseLoadType(l.exerciseId) !== 'weighted') continue;
-    (datesById.get(l.exerciseId) ?? datesById.set(l.exerciseId, new Set()).get(l.exerciseId)).add(l.date);
-  }
-  let best = null;
-  for (const [id, dates] of datesById) {
-    const sessions = dates.size;
-    if (sessions < 2) continue;
-    const name = getExerciseName(id);
-    if (!best || sessions > best.sessions ||
-        (sessions === best.sessions && name.localeCompare(best.name) < 0)) {
-      best = { id, name, sessions };
-    }
-  }
-  return best;
-}
-
-/**
- * Module 6 — a shared-timeline overlay of the key lift's estimated 1RM and
- * bodyweight, for reading together. DISPLAY ONLY, by design: the app places two
- * existing series on one time axis and nothing more. It does not pair sessions
- * to weigh-ins, compute a correlation, or exclude shoot days — that reasoning
- * stays in the Claude analysis layer.
- *
- * Scaling: both series share ONE kilogram-per-pixel scale, each centred on its
- * own midpoint — the same treatment the recomposition chart uses, and for the
- * same reason. Previously each line was normalised to its own min/max, which
- * stretched a 3kg bodyweight drift and a 26kg strength gain to the identical
- * height: the two slopes could not be compared, and the point where the lines
- * crossed was an artefact of independent scaling rather than anything true.
- * One scale makes the gradients mean the same thing, which is the entire
- * purpose of drawing them on one timeline. Renders nothing without both series.
- */
-function buildStrengthBodyweightChartSVG(bw, strength, liftName) {
-  const W = 320, H = 176;
-  const P = { top: 16, right: 40, bottom: 30, left: 40 };
-  const cW = W - P.left - P.right;
-  const cH = H - P.top  - P.bottom;
-  // Bodyweight was #38D39F against strength's cyan — a normal-vision ΔE of 13.4,
-  // under the 15 floor, so the two lines were genuinely hard to separate even
-  // with full colour vision. Indigo (--chart-2) lifts that pair to ΔE 33.8.
-  const BW_COLOR = CHART_COLORS().series[1], S_COLOR = CHART_COLORS().accent;
-
-  const t = ds => parseDate(ds).getTime();
-  const allT = [...bw, ...strength].map(p => t(p.date));
-  const tMin = Math.min(...allT), tMax = Math.max(...allT);
-  const x = ts => P.left + (tMax === tMin ? cW / 2 : ((ts - tMin) / (tMax - tMin)) * cW);
-
-  // One kg-per-pixel scale for both series: the widest span either one covers,
-  // with headroom so neither line touches the frame. minSpan keeps a flat
-  // series from being magnified into noise.
-  const MIN_SPAN_KG = 4;
-  const spanOf = arr => {
-    const v = arr.map(p => p.value);
-    return Math.max(...v) - Math.min(...v);
-  };
-  const centreOf = arr => {
-    const v = arr.map(p => p.value);
-    return (Math.max(...v) + Math.min(...v)) / 2;
-  };
-  const span = Math.max(spanOf(bw), spanOf(strength), MIN_SPAN_KG) * 1.25;
-  const bwC = centreOf(bw), sC = centreOf(strength);
-  const yOn = centre => v => P.top + cH / 2 - ((v - centre) / span) * cH;
-  const yBw = yOn(bwC);
-  const yS  = yOn(sC);
-  // Axis end labels still read in each series own kg, at the frame edges.
-  const bwR = { lo: bwC - span / 2, hi: bwC + span / 2 };
-  const sR  = { lo: sC  - span / 2, hi: sC  + span / 2 };
-
-  const lineOf = (arr, yfn) => arr.map(p => `${x(t(p.date)).toFixed(1)},${yfn(p.value).toFixed(1)}`).join(' ');
-  const dotsOf = (arr, yfn, c) => arr.map(p =>
-    `<circle cx="${x(t(p.date)).toFixed(1)}" cy="${yfn(p.value).toFixed(1)}" r="2.2" fill="${c}"/>`).join('');
-
-  const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
-  const firstLabel = axisDateLabel(new Date(tMin));
-  const lastLabel  = axisDateLabel(new Date(tMax));
-
-  const legend = `<div class="volume-legend">
-      <span class="volume-legend-item"><span class="volume-legend-dot" style="background:${BW_COLOR}"></span>Bodyweight</span>
-      <span class="volume-legend-item"><span class="volume-legend-dot" style="background:${S_COLOR}"></span>${escHtml(liftName)} e1RM</span>
-    </div>`;
-
-  return `
-    ${legend}
-    <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"
-         style="width:100%;display:block;overflow:visible" role="img"
-         aria-label="Bodyweight and ${escHtml(liftName)} estimated 1RM on a shared timeline">
-      <line x1="${P.left}" y1="${P.top}" x2="${P.left}" y2="${P.top + cH}" stroke="${CHART_COLORS().grid}" stroke-width="1"/>
-      <line x1="${P.left + cW}" y1="${P.top}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="${CHART_COLORS().grid}" stroke-width="1"/>
-      <line x1="${P.left}" y1="${P.top + cH}" x2="${P.left + cW}" y2="${P.top + cH}" stroke="${CHART_COLORS().grid}" stroke-width="1"/>
-      <polyline points="${lineOf(bw, yBw)}" fill="none" stroke="${BW_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-      <polyline points="${lineOf(strength, yS)}" fill="none" stroke="${S_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-      ${dotsOf(bw, yBw, BW_COLOR)}
-      ${dotsOf(strength, yS, S_COLOR)}
-      <g font-size="10" font-family="Inter,system-ui,sans-serif">
-        <text x="${(P.left - 5).toFixed(1)}" y="${P.top.toFixed(1)}" dominant-baseline="middle" text-anchor="end" fill="${BW_COLOR}">${fmt(bwR.hi)}</text>
-        <text x="${(P.left - 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}" dominant-baseline="middle" text-anchor="end" fill="${BW_COLOR}">${fmt(bwR.lo)}</text>
-        <text x="${(P.left + cW + 5).toFixed(1)}" y="${P.top.toFixed(1)}" dominant-baseline="middle" text-anchor="start" fill="${S_COLOR}">${fmt(sR.hi)}</text>
-        <text x="${(P.left + cW + 5).toFixed(1)}" y="${(P.top + cH).toFixed(1)}" dominant-baseline="middle" text-anchor="start" fill="${S_COLOR}">${fmt(sR.lo)}</text>
-        <text x="${P.left.toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="${CHART_COLORS().axis}">${escHtml(firstLabel)}</text>
-        <text x="${(P.left + cW).toFixed(1)}" y="${H - 4}" text-anchor="middle" fill="${CHART_COLORS().axis}">${escHtml(lastLabel)}</text>
-      </g>
-    </svg>`;
-}
-
-function buildHubStrengthBodyweight(days) {
-  const bw = days.filter(d => d.weight != null).map(d => ({ date: d.date, value: d.weight }));
-  if (bw.length < 2) return '';
-
-  const lift = pickKeyLift();
-  if (!lift) return '';
-
-  const strength = computeExerciseSeries(state, lift.id, { name: lift.name, unit: 'reps', loadType: 'weighted' }).points;
-  if (strength.length < 2) return '';
-
-  return `
-    <div class="card hub-card hub-strength-bw">
-      <div class="hub-card-head">
-        <span class="hub-card-title">Strength vs Bodyweight</span>
-        <span class="hub-card-meta">shared timeline</span>
-      </div>
-      ${buildStrengthBodyweightChartSVG(bw, strength, lift.name)}
-      <p class="hub-chart-note">Both series share one kilogram-per-pixel scale on separate offsets, so the two slopes are directly comparable. The app doesn't pair or correlate them.</p>
-    </div>`;
-}
-
 function buildHubQuickActions() {
   const action = (act, label, path) => `
     <button class="hub-action" data-hub-action="${act}">
@@ -2589,10 +2426,6 @@ function renderHub() {
     buildHubNextUp() +
     buildHubConsistency() +
     buildHubBody(days) +
-    buildHubTrend(days) +
-    buildHubStrengthBodyweight(days) +
-    buildHubActivityHeatmap() +
-    buildHubMuscleFocus() +
     buildHubPRs() +
     buildHubPlateaus() +
     buildHubLastBackup() +
@@ -3603,7 +3436,139 @@ async function handleRemoveExercise(exerciseId, exerciseName, date) {
 // Bodyweight moved to the Body tab, which draws it from imported Fitdays
 // readings. The old chart here was fed by the manual weight prompt that no
 // longer exists, so it would only ever have shown a frozen history.
-function renderProgress() {
+// ═════════════════════════════════════════════════════════════════════════════
+//  STATS TAB — the analytics hub
+//
+//  Everything that answers "how is it going" in one place: four headline
+//  counts, the activity heatmap, the muscle map, weekly volume, per-exercise
+//  progress, and the recent sessions. The activity heatmap and the muscle map
+//  used to sit on the hub; they belong here, and the hub stays a landing view.
+//  Every figure is the same deterministic read of plan + logs it always was —
+//  the one exception is the muscle map's Strength reading, which states on its
+//  own face that it applies a detraining model (see heatmaps.js).
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The muscles string for an exercise definition. Definitions carry one when
+ * they came from the seed or the library picker; anything typed in freehand
+ * does not, so fall back to a name match against the vendored library — the
+ * same match getExerciseLoadType already trusts for typing.
+ */
+function resolveExerciseMuscles(ex) {
+  if (ex?.muscles) return ex.muscles;
+  const match = ex?.name ? matchLibraryEntry(ex.name) : null;
+  if (!match) return '';
+  return [match.primaryMuscle, ...(match.secondaryMuscles ?? [])].filter(Boolean).join(' · ');
+}
+
+/** Four headline counts. Plain reads of the same session set the hub uses. */
+function buildStatTiles() {
+  const days     = toDailySeries(state.bodyComposition);
+  const weighIns = days.filter(d => d.weight != null);
+  const cutoff   = dateStrPlus(state.ui.today, -30);
+  const recent   = weighIns.filter(d => d.date >= cutoff);
+  const delta30  = recent.length > 1 ? recent[recent.length - 1].weight - recent[0].weight : null;
+
+  const tile = (icon, label, value, extraClass = '', action = '') => `
+    <${action ? 'button' : 'div'} class="stat-tile${extraClass ? ' ' + extraClass : ''}"${action ? ` data-hub-action="${action}"` : ''}>
+      <span class="stat-tile-label">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icon}</svg>
+        ${label}
+      </span>
+      <span class="stat-tile-value">${value}</span>
+    </${action ? 'button' : 'div'}>`;
+
+  const ICON_DUMBBELL = '<path d="M6.5 6.5v11"/><path d="M17.5 6.5v11"/><path d="M3 9v6"/><path d="M21 9v6"/><path d="M6.5 12h11"/>';
+  const ICON_CALENDAR = '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>';
+  const ICON_FLAME    = '<path d="M12 2c1 4 4 5 4 9a4 4 0 0 1-8 0c0-1.5.6-2.4 1.2-3.2C10 6.7 12 5 12 2z"/><path d="M8.2 12A6 6 0 0 0 12 22a6 6 0 0 0 3.8-10"/>';
+  const ICON_SCALE    = '<path d="M12 3v18"/><path d="M5 8h14"/><path d="M5 8 2 15h6z"/><path d="M19 8l3 7h-6z"/>';
+
+  const streak = trainingWeekStreak();
+
+  return [
+    tile(ICON_DUMBBELL, 'Sessions',   sessionDatesSet().size),
+    tile(ICON_CALENDAR, 'This month', sessionsThisMonth()),
+    tile(ICON_FLAME,    'Week streak', streak),
+    tile(ICON_SCALE,    'Weight 30d',
+      delta30 == null ? '—' : `${delta30 > 0 ? '+' : ''}${bcFmt(delta30)}<span class="stat-tile-unit">kg</span>`,
+      'stat-tile-sm', 'open-body'),
+  ].join('');
+}
+
+/**
+ * The most recent training days, newest first — date, session name, and what
+ * was actually logged. Tapping one opens that date in the day view.
+ */
+const RECENT_SESSION_LIMIT = 6;
+
+function buildRecentSessions() {
+  const dates = [...sessionDatesSet()].filter(d => d <= state.ui.today).sort().reverse()
+    .slice(0, RECENT_SESSION_LIMIT);
+  if (!dates.length) {
+    return '<p class="chart-empty">Finish a session to see it here.</p>';
+  }
+
+  return dates.map(date => {
+    const logs = state.logs.filter(l => l.date === date && l.done && l.reps != null);
+    const exercises = new Set(logs.map(l => canonicalExerciseId(l.exerciseId))).size;
+    // Tonnage counts weighted load only, for the same reason the volume chart
+    // does: bodyweight and timed work have no meaningful kilograms.
+    const tonnage = logs.reduce((sum, l) =>
+      getExerciseLoadType(canonicalExerciseId(l.exerciseId)) === 'weighted' && l.weight && l.reps
+        ? sum + l.weight * l.reps : sum, 0);
+    const name = sessionTypeForDate(date);
+    const bits = [`${exercises} exercise${exercises === 1 ? '' : 's'}`, `${logs.length} set${logs.length === 1 ? '' : 's'}`];
+    if (tonnage > 0) bits.push(`${(tonnage / 1000).toFixed(1)}t`);
+
+    return `
+      <button class="recent-session-row" data-hub-action="open-session" data-date="${date}">
+        <span class="recent-session-main">
+          <span class="recent-session-name">${escHtml(name)}</span>
+          <span class="recent-session-meta">${escHtml(bits.join(' · '))}</span>
+        </span>
+        <span class="recent-session-date">${escHtml(friendlyDateLabel(date))}</span>
+      </button>`;
+  }).join('');
+}
+
+/** Paints the muscle-map card into its slot and wires its controls. */
+function renderMuscleMap() {
+  const host = document.getElementById('stats-muscle-map');
+  if (!host) return;
+
+  host.innerHTML = buildMuscleMapCard(state, {
+    today: state.ui.today,
+    ui: state.ui.muscleMap,
+    resolveMuscles: resolveExerciseMuscles,
+  });
+
+  // Tab / window segments and muscle taps. All three only change view state,
+  // so each just re-renders this one card — never the whole tab.
+  host.querySelectorAll('[data-map-control]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const { mapControl, mapValue } = btn.dataset;
+      if (mapControl === 'tab') state.ui.muscleMap.tab = mapValue;
+      if (mapControl === 'win') state.ui.muscleMap.win = Number(mapValue);
+      state.ui.muscleMap.selected = null; // a new view starts with nothing picked
+      renderMuscleMap();
+    });
+  });
+
+  host.querySelectorAll('[data-muscle]').forEach(path => {
+    path.addEventListener('click', () => {
+      const slug = path.dataset.muscle;
+      state.ui.muscleMap.selected = state.ui.muscleMap.selected === slug ? null : slug;
+      renderMuscleMap();
+    });
+  });
+}
+
+function renderStats() {
+  document.getElementById('stat-tiles').innerHTML      = buildStatTiles();
+  document.getElementById('stats-activity').innerHTML  = buildActivityHeatmapCard(state.logs, { today: state.ui.today });
+  document.getElementById('recent-sessions').innerHTML = buildRecentSessions();
+
   // Weekly volume chart
   const volCard = document.getElementById('volume-chart-card');
   const volData = buildWeeklyVolumeData();
@@ -3616,6 +3581,34 @@ function renderProgress() {
 
   // Exercise history selector
   populateHistorySelect();
+
+  // The body geometry is a ~94 KB dynamic import. Draw the card now (it renders
+  // a fixed-height placeholder where the figure goes, so nothing below jumps),
+  // then draw it again once the artwork lands.
+  renderMuscleMap();
+  if (!bodyPathsReady()) {
+    loadBodyPaths().then(() => {
+      if (state.ui.currentView === 'stats') renderMuscleMap();
+    });
+  }
+
+  wireStatsActions();
+}
+
+/** Delegated wiring for the Stats tab's tappable tiles and session rows. */
+function wireStatsActions() {
+  document.querySelectorAll('#view-stats [data-hub-action]').forEach(el => {
+    el.addEventListener('click', () => {
+      switch (el.dataset.hubAction) {
+        case 'open-body': switchView('body'); break;
+        case 'open-session':
+          state.ui.viewedDate = el.dataset.date || state.ui.today;
+          state.ui.expandedExerciseId = null;
+          switchView('today');
+          break;
+      }
+    });
+  });
 }
 
 // Deterministic colour slots for session types, assigned in plan-day order.

@@ -3777,40 +3777,303 @@ body.detail-open { overflow: hidden; }
 }
 .heatmap-legend .heatmap-cell { width: 9px; height: 9px; }
 
-.muscle-bar-list {
+
+/* ═══════════════════════════════════════════════════════
+   MUSCLE MAP — Stats tab (heatmaps.js + muscles.js)
+
+   The anatomical front/back diagram and the three readings behind it
+   (balance / fatigue / strength). The shade levels are the SAME five steps the
+   activity heatmap uses, so "more accent = more training" means one thing
+   everywhere in the app rather than two — which is why the levels below are
+   written as accent mixes rather than as a second colour family.
+
+   Fatigue and strength override the top levels because they are not
+   "more is more" scales: a red chest means rest it, not that it is winning.
+   Those two reuse the palette's existing danger/warning/success tokens — no
+   new colours enter the design system for this.
+═══════════════════════════════════════════════════════ */
+.body-map {
+  --map-base: var(--color-surface-2);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* The geometry is a ~94 KB dynamic import; this holds the card height while it
+   lands so nothing below the map jumps when the figure appears. */
+.body-map-placeholder { height: 240px; }
+
+.body-figure {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  max-height: min(46vh, 340px);
+}
+
+/* A hairline of card surface between neighbouring muscles, so two adjacent
+   regions at the same level still read as two shapes rather than one blob. */
+.body-figure path {
+  stroke: var(--color-surface);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+}
+
+.body-filler { fill: color-mix(in srgb, var(--color-text) 16%, var(--color-surface)); }
+
+.body-region {
+  fill: var(--map-base);
+  cursor: pointer;
+  transition: fill var(--transition-normal);
+}
+.body-region.level-1 { fill: color-mix(in srgb, var(--color-accent) 32%, var(--map-base)); }
+.body-region.level-2 { fill: color-mix(in srgb, var(--color-accent) 56%, var(--map-base)); }
+.body-region.level-3 { fill: color-mix(in srgb, var(--color-accent) 78%, var(--map-base)); }
+.body-region.level-4 { fill: var(--color-accent); }
+.body-region.is-selected { stroke: var(--color-text); stroke-width: 7px; }
+
+.map-fatigue .body-region.level-4 { fill: var(--color-danger); }
+.map-fatigue .body-region.level-3 { fill: var(--color-warm); }
+.map-fatigue .body-region.level-2 { fill: var(--color-warning); }
+.map-fatigue .body-region.level-1 { fill: color-mix(in srgb, var(--color-warning) 32%, var(--map-base)); }
+
+.map-strength .body-region.level-4 { fill: var(--color-success); }
+
+/* Legend variants — same swatch, different reading, so the strip reuses
+   .heatmap-legend / .heatmap-cell rather than inventing a second one. */
+.map-legend-fatigue .heatmap-cell.level-4 { background-color: var(--color-danger); }
+.map-legend-fatigue .heatmap-cell.level-2 { background-color: var(--color-warning); }
+.map-legend-strength .heatmap-cell.level-4 { background-color: var(--color-success); }
+.map-legend-dim { color: var(--color-border-muted); }
+
+/* ── The muscle-map card chrome ───────────────────────── */
+.hub-muscle-map { gap: 10px; }
+
+.mm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+
+.mm-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--color-secondary);
+}
+
+.mm-sub {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--color-tertiary);
+}
+
+.mm-section {
+  margin: 10px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-secondary);
+}
+
+.mm-note,
+.mm-empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-tertiary);
+}
+
+/* name · bar · value, the row shape under every reading */
+.mm-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 0;
+}
+.mm-row-tall { min-height: 48px; align-items: stretch; }
+.mm-row-selected {
+  border-top: 1px solid var(--color-border);
+  margin-top: 2px;
+  padding-top: 6px;
+}
+
+.mm-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mm-name-stacked {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  justify-content: center;
+  white-space: normal;
+  line-height: 1.35;
 }
-.muscle-bar-row {
-  display: grid;
-  grid-template-columns: 92px 1fr 28px;
-  align-items: center;
-  gap: 8px;
-}
-.muscle-bar-name {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--color-text);
+.mm-name-line {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.muscle-bar-track {
-  height: 8px;
-  border-radius: 4px;
-  background-color: var(--color-surface-2);
+.mm-name-meta { font-size: 11px; color: var(--color-tertiary); }
+.mm-role { margin-left: 6px; font-size: 11px; color: var(--color-tertiary); }
+
+.mm-bar {
+  flex: none;
+  width: 74px;
+  height: 5px;
+  border-radius: 3px;
   overflow: hidden;
+  background-color: var(--color-surface-2);
+  align-self: center;
 }
-.muscle-bar-fill {
+.mm-bar i {
+  display: block;
   height: 100%;
-  border-radius: 4px;
+  border-radius: 3px;
   background-color: var(--color-accent);
 }
-.muscle-bar-count {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--color-secondary);
+
+.mm-value {
+  flex: none;
+  min-width: 56px;
   text-align: right;
-  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--color-secondary);
+  align-self: center;
 }
+.mm-value-dim { color: var(--color-tertiary); }
+
+.mm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.mm-chip {
+  padding: 4px 9px;
+  border-radius: 99px;
+  font-size: 12px;
+  background-color: var(--color-surface-2);
+  color: var(--color-secondary);
+}
+.mm-chip.is-missed {
+  background-color: var(--color-warm-dim);
+  color: var(--color-warm);
+}
+
+/* ═══════════════════════════════════════════════════════
+   SEGMENTED CONTROL — the map tab strip and window picker
+═══════════════════════════════════════════════════════ */
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-2);
+}
+
+.segmented-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 30px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: calc(var(--radius-md) - 3px);
+  background: transparent;
+  color: var(--color-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+.segmented-btn.is-on {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-weight: 600;
+}
+.segmented-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* ═══════════════════════════════════════════════════════
+   STATS TAB — header, tiles, recent sessions
+═══════════════════════════════════════════════════════ */
+.stats-header {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+.stats-sub { font-size: 13px; color: var(--color-tertiary); }
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  text-align: left;
+  font-family: inherit;
+}
+button.stat-tile { cursor: pointer; }
+button.stat-tile:active { transform: scale(0.99); }
+
+.stat-tile-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--color-secondary);
+}
+
+.stat-tile-value {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.026em;
+}
+.stat-tile-sm .stat-tile-value { font-size: 22px; }
+.stat-tile-unit { font-size: 13px; font-weight: 500; color: var(--color-secondary); margin-left: 3px; }
+
+.recent-sessions { display: flex; flex-direction: column; gap: 8px; }
+
+.recent-session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+.recent-session-row:active { transform: scale(0.99); }
+.recent-session-row:hover { border-color: var(--color-border-muted); }
+
+.recent-session-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.recent-session-name {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-session-meta { font-size: 12px; color: var(--color-tertiary); }
+.recent-session-date { flex: none; font-size: 12px; color: var(--color-secondary); }
